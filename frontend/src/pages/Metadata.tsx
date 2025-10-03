@@ -18,12 +18,18 @@ import {
   TablePagination,
   Tabs,
   Tab,
+  Table,
+  TableHead,
+  TableRow,
+  TableCell,
+  TableBody,
+  Link,
 } from '@mui/material';
 import DownloadIcon from '@mui/icons-material/Download';
+import { Link as RouterLink } from 'react-router-dom';
 
 import RangeFilter from '../components/RangeFilter';
 import { ColumnVisibilityMenu } from '../components/ColumnVisibilityMenu';
-import GenericTable from '../components/GenericTable';
 import BasicTaxonomy from '../components/BasicTaxonomy';
 
 // ---------------- helpers ----------------
@@ -151,6 +157,10 @@ export default function MetadataPage() {
 
   // --- formatting μόνο για εμφάνιση: zdna_density με 2 δεκαδικά ---
   const densityColKey = useMemo(() => findCol(cols, 'zdna_density'), [cols]);
+
+  const assemblyColKey = useMemo(() => findCol(cols, 'assembly'), [cols]);
+  const visibleCols = useMemo(() => cols.filter(c => columnsVisible[c] !== false), [cols, columnsVisible]);
+
 
   const displayRows = useMemo(() => {
     if (!densityColKey) return rows;
@@ -431,9 +441,35 @@ export default function MetadataPage() {
     grid: { left: 60, right: 20, top: 50, bottom: 80 }
   }), [histGC]);
 
+  // Συνάρτηση για κεφαλαίο το πρώτο γράμμα και αντικατάσταση των κάτω παυλών με κενά
+  const capitalize = (str: string) => {
+    const withSpaces = str.replace(/_/g, ' ');
+    return withSpaces
+      .split(' ')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+      .join(' ');
+  };
+
+  const reorderedColumns = useMemo(() => {
+    if (!assemblyColKey || !cols.includes('tax_name')) return visibleCols;
+    
+    // Αφαιρούμε τα assembly και tax_name από τις υπόλοιπες στήλες
+    const otherCols = visibleCols.filter(c => 
+      c !== assemblyColKey && c.toLowerCase() !== 'tax_name'
+    );
+    
+    // Επιστρέφουμε τη νέα σειρά: assembly -> tax_name -> υπόλοιπες
+    return [
+      assemblyColKey,
+      'tax_name',
+      ...otherCols
+    ];
+  }, [visibleCols, assemblyColKey]);
+
   // ---------------- render ----------------
   return (
     <Box sx={{ p: 2 }}>
+      <Typography variant="h6" sx={{ mb: 2 }}>Species browser</Typography>
       {/* TOP BAR — Superkingdom + Filter-on-taxonomy + Apply/Reset + Export + Columns */}
       <Paper
         elevation={1}
@@ -448,7 +484,13 @@ export default function MetadataPage() {
             value={superkingdom}
             onChange={(_, v) => setSuperkingdom(v)}
             renderInput={(p) => (
-              <TextField {...p} size="small" placeholder="Select superkingdom" sx={{ width: 260 }} />
+              <TextField 
+                {...p} 
+                size="small" 
+                placeholder="Select superkingdom" 
+                sx={{ width: 260 }} 
+                autoComplete="off"  // Added this line
+              />
             )}
           />
         </Box>
@@ -550,6 +592,7 @@ export default function MetadataPage() {
                   value={exact.assembly_eq}
                   onChange={(e) => setExact((s) => ({ ...s, assembly_eq: e.target.value }))}
                   sx={{ width: 240 }}
+                  autoComplete="off"  // Added this line
                 />
               </Box>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -561,6 +604,7 @@ export default function MetadataPage() {
                   value={exact.taxid_eq}
                   onChange={(e) => setExact((s) => ({ ...s, taxid_eq: e.target.value }))}
                   sx={{ width: 240 }}
+                  autoComplete="off"  // Added this line
                 />
               </Box>
             </Box>
@@ -597,7 +641,49 @@ export default function MetadataPage() {
                   />
                 </Box>
 
-                <GenericTable rows={displayRows} columns={cols} visible={columnsVisible} />
+                
+                {/* RESULTS TABLE */}
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      {reorderedColumns.map((c) => (
+                        <TableCell key={c}>
+                          {c.toLowerCase() === 'tax_name' ? 'Species' : capitalize(c)}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {displayRows.map((row, i) => (
+                      <TableRow key={row.id ?? `${page}-${i}`}>
+                        {reorderedColumns.map((colKey) => {
+                          const val = row[colKey];
+                          if (assemblyColKey && colKey === assemblyColKey) {
+                            const asm = String(val ?? '');
+                            return (
+                              <TableCell key={colKey}>
+                                {asm ? (
+                                  <Link
+                                    component={RouterLink}
+                                    to={`/explore?assembly=${encodeURIComponent(asm)}`}
+                                    underline="hover"
+                                    sx={{ cursor: 'pointer' }}
+                                  >
+                                    {asm}
+                                  </Link>
+                                ) : (
+                                  ''
+                                )}
+                              </TableCell>
+                            );
+                          }
+                          return <TableCell key={colKey}>{String(val ?? '')}</TableCell>;
+                        })}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+
 
                 {/* BOTTOM pagination */}
                 <TablePagination

@@ -1,731 +1,964 @@
-import { useEffect, useMemo, useState } from 'react';
-import ChromosomeAutocomplete from '../components/ChromosomeAutocomplete';
-import AssemblyAutocomplete from '../components/AssemblyAutocomplete';
-
-import ReactECharts from 'echarts-for-react';
-
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import {
-  Backdrop,
+  Autocomplete,
   Box,
   Button,
+  Chip,
   CircularProgress,
+  Grid,
   IconButton,
   Menu,
   MenuItem,
   Paper,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
+  Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
   TablePagination,
-  TableRow,
-  TableSortLabel,
-  Tabs,
-  Tab,
+  Tabs, Tab,
   TextField,
-  Toolbar,
+  Tooltip,
   Typography,
 } from '@mui/material';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import DownloadIcon from '@mui/icons-material/Download';
+import ReactECharts from 'echarts-for-react';
+import { useSearchParams } from 'react-router-dom';
+import { useDebounce } from '../hooks/useDebounce';
 
-type Row = Record<string, any>;
+/* ------------------------------- Types/Helpers ------------------------------ */
 
-// ---- Σταθερές / κλειδιά πεδίων ----
-const SCORE_KEY = 'Z-DNA Score';
+type Row = {
+  Chromosome: string;
+  Start: number;
+  End: number;
+  Score: number;      // mapped from "Z-DNA Score"
+  Sequence: string;
+};
 
-// Βασικές στήλες πίνακα
-const BASE_COLS = [
-  { key: 'chrom', label: 'Chromosome', api: 'Chromosome', numeric: false },
-  { key: 'start', label: 'Start', api: 'Start', numeric: true },
-  { key: 'end', label: 'End', api: 'End', numeric: true },
-  { key: 'score', label: 'Z‑DNA Score', api: SCORE_KEY, numeric: true },
-  { key: 'seq', label: 'Sequence', api: 'Sequence', numeric: false },
-] as const;
+type KV = { label: string };
 
-// Προαιρετική στήλη Assembly (αν επιστρέφεται από backend)
-const ASM_COL = { key: 'assembly', label: 'Assembly', api: 'assembly', numeric: false } as const;
+const DEFAULT_PAGE_SIZE = 25;
+const PAGE_SIZE_OPTIONS = [25, 50, 100];
+const AUTOCOMPLETE_LIMIT = 100;
+const BATCH_EXPORT = 50_000;          // rows per export chunk
+const MAX_EXPORT_ROWS = 1_000_000;    // safety cap for client export
+const SCATTER_SAMPLE = 20_000;        // nominal sample size for scatter
 
-type SortKey = 'chrom' | 'start' | 'end' | 'score' | 'assembly' | 'none';
+const q = (s: string) => `'${String(s).replace(/'/g, "''")}'`;
+const fmtNum = (n: number) => (Number.isFinite(n) ? n.toLocaleString() : '');
+const getVal = (o: any, k: string) => o?.[k] ?? o?.[k.toLowerCase()] ?? o?.[k.toUpperCase()];
 
-// Δείγμα σειρών για Visualizations (όχι όλο το σύνολο, για ταχύτητα)
-const VIZ_LIMIT = 5000;
+function FullWidthChart({
+  option,
+  height = 400,
+  deps = [],
+  ...rest
+}: {
+  option: Record<string, unknown>;
+  height?: number;
+  deps?: any[];
+  [key: string]: any;
+}) {
+  const ref = useRef(null);
 
-// ---------------- Component ----------------
-export default function Explorer() {
-  // -------- Tabs --------
-  const [tab, setTab] = useState(0);
+  useEffect(() => {
+    // μικρή καθυστέρηση ώστε να έχει μετρηθεί σωστά το layout του Grid
+    const t = setTimeout(() => {
+      ref.current?.getEchartsInstance()?.resize();
+    }, 0);
+    return () => clearTimeout(t);
+  }, deps);
 
-  // -------- Filters --------
-  const [chr, setChr] = useState<string>('');
-  const [startText, setStartText] = useState<string>('');
-  const [endText, setEndText] = useState<string>('');
-  // Z‑DNA Score σε 2 inputs (≥ και ≤)
-  const [scoreMinText, setScoreMinText] = useState<string>('');
-  const [scoreMaxText, setScoreMaxText] = useState<string>('');
-  const [seq, setSeq] = useState<string>('');
-  const [assemblyEq, setAssemblyEq] = useState<string>(''); // exact assembly
-  // re‑mount token για να καθαρίζουν τα Autocomplete στο RESET
-  const [resetToken, setResetToken] = useState<number>(0);
+  return (
+    <ReactECharts
+      ref={ref}
+      option={option}
+      style={{ height, width: '100%' }}
+      opts={{ renderer: 'svg' }}
+      notMerge={true}
+      lazyUpdate={false}
+      {...rest}
+    />
+  );
+}
 
-  // -------- Results / state --------
-  const [rows, setRows] = useState<Row[]>([]);
-  const [columns, setColumns] = useState<string[]>([]);
-  const [loadingRows, setLoadingRows] = useState(false);
 
-  // pagination
-  const [limit, setLimit] = useState<number>(25);
-  const [offset, setOffset] = useState<number>(0);
-  const page = Math.floor(offset / limit);
-  const onPageChange = (_: unknown, newPage: number) => setOffset(newPage * limit);
-  const onRowsPerPageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newLimit = parseInt(e.target.value, 10) || 25;
-    setLimit(newLimit);
-    setOffset(0);
+/* --------------------------------- SQL runner -------------------------------- */
+// FIX: normalize SQL to single line + better error handling (prevents 400s on some backends)
+async function runSQL<T = any>(sql: string): Promise<T[]> {
+  const normalized = sql.replace(/\s+/g, ' ').trim();
+  const url = `/api/sql?query=${encodeURIComponent(normalized)}`;
+  const r = await fetch(url, { headers: { Accept: 'application/json' }, cache: 'no-store' });
+  const text = await r.text();
+  let j: any = null;
+  try { j = JSON.parse(text); } catch { /* ignore */ }
+  if (!r.ok) {
+    const msg = (j && j.error) ? String(j.error) : `SQL HTTP ${r.status}`;
+    throw new Error(msg);
+  }
+  if (Array.isArray(j?.data)) return j.data as T[];
+  if (Array.isArray(j?.rows) && Array.isArray(j?.columns)) {
+    const cols: string[] = j.columns;
+    return (j.rows as any[]).map((arr) =>
+      Object.fromEntries(cols.map((c, i) => [c, arr[i]]))
+    ) as T[];
+  }
+  return Array.isArray(j) ? (j as T[]) : [];
+}
+
+/* -------------------------------- Exporters -------------------------------- */
+
+function buildCsv(rows: Row[], sep = ',') {
+  const head = ['Chromosome', 'Start', 'End', 'Z-DNA Score', 'Sequence'];
+  const escape = (v: any) => {
+    const s = v == null ? '' : String(v);
+    if (s.includes(sep) || s.includes('"') || s.includes('\n')) {
+      return `"${s.replace(/"/g, '""')}"`;
+    }
+    return s;
   };
+  const lines = [head.join(sep)];
+  for (const r of rows) {
+    lines.push([escape(r.Chromosome), r.Start, r.End, r.Score, escape(r.Sequence)].join(sep));
+  }
+  return lines.join('\n');
+}
+const buildJson = (rows: Row[]) => JSON.stringify(rows, null, 2);
+function buildXml(rows: Row[]) {
+  const esc = (s: any) =>
+    String(s ?? '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+  const items = rows.map(r =>
+    `<row><Chromosome>${esc(r.Chromosome)}</Chromosome><Start>${r.Start}</Start><End>${r.End}</End><ZDNA_Score>${r.Score}</ZDNA_Score><Sequence>${esc(r.Sequence)}</Sequence></row>`
+  );
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<rows>\n${items.join('\n')}\n</rows>\n`;
+}
+function buildExcelHtml(rows: Row[]) {
+  const esc = (s: any) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const head = `<tr><th>Chromosome</th><th>Start</th><th>End</th><th>Z-DNA Score</th><th>Sequence</th></tr>`;
+  const body = rows
+    .map(r => `<tr><td>${esc(r.Chromosome)}</td><td>${r.Start}</td><td>${r.End}</td><td>${r.Score}</td><td>${esc(r.Sequence)}</td></tr>`)
+    .join('\n');
+  return `<!DOCTYPE html><html><head><meta charSet="utf-8" /></head><body><table border="1">${head}${body}</table></body></html>`;
+}
+function downloadBlob(content: BlobPart | BlobPart[], filename: string, type: string) {
+  const blob = new Blob(Array.isArray(content) ? content : [content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 
-  // total rows (auto-count)
-  const [total, setTotal] = useState<number>(0);
-  const [counting, setCounting] = useState<boolean>(false);
+/* -------------------------------- Component -------------------------------- */
 
-  // sorting (local)
-  const [sortKey, setSortKey] = useState<SortKey>('none');
-  const [order, setOrder] = useState<'ASC' | 'DESC'>('ASC');
+// Cache for species search results
+const speciesSearchCache = new Map<string, KV[]>();
 
-  // explicit APPLY
-  const [hasApplied, setHasApplied] = useState(false);
-  const [applyTick, setApplyTick] = useState(0);
+export default function Explorer() {
+  const [searchParams] = useSearchParams();
+  const lockedAssemblyFromURL = searchParams.get('assembly');
+
+  // Tabs
+  const [tab, setTab] = useState<'results' | 'viz'>('results');
+
+  // (optional) locked assembly via URL
+  const [lockedAssembly, setLockedAssembly] = useState<string | null>(null);
+
+  // species (optional if assembly locked)
+  const [species, setSpecies] = useState<string | null>(null);
+  const [speciesInput, setSpeciesInput] = useState('');
+  const [speciesOpts, setSpeciesOpts] = useState<KV[]>([]);
+  const [loadingSpecies, setLoadingSpecies] = useState(false);
+
+  // chromosome (depends on species OR locked assembly)
+  const [chr, setChr] = useState<string | null>(null);
+  const [chrInput, setChrInput] = useState('');
+  const [chrOpts, setChrOpts] = useState<KV[]>([]);
+  const [loadingChr, setLoadingChr] = useState(false);
+
+  // numeric / text filters
+  const [startMin, setStartMin] = useState('');
+  const [startMax, setStartMax] = useState('');
+  const [endMin,   setEndMin]   = useState('');
+  const [endMax,   setEndMax]   = useState('');
+  const [scoreMin, setScoreMin] = useState('');
+  const [scoreMax, setScoreMax] = useState('');
+  const [contains, setContains] = useState('');
+
+  // results + pagination
+  const [rows, setRows] = useState<Row[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [page, setPage] = useState(0);
+  const [rpp, setRpp] = useState(DEFAULT_PAGE_SIZE);
 
   // export menu
   const [exportAnchor, setExportAnchor] = useState<null | HTMLElement>(null);
+  const exportOpen = Boolean(exportAnchor);
 
-  // --- Visualizations state (φέρνουμε δείγμα ίδιων φιλτραρισμένων rows) ---
-  const [vizRows, setVizRows] = useState<Row[]>([]);
-  const [vizLoading, setVizLoading] = useState(false);
-
-  // Έλεγχος αν υπάρχουν φίλτρα
-  const canApply =
-    chr.trim() !== '' ||
-    !!startText ||
-    !!endText ||
-    !!scoreMinText ||
-    !!scoreMaxText ||
-    seq.trim() !== '' ||
-    assemblyEq.trim() !== '';
-
-  // --- APPLY: φέρνουμε rows (fast) + τρέχουμε αυτόματα count & viz sample ---
-  const onApply = () => {
-    if (!canApply) return;
-    setHasApplied(true);
-    setOffset(0);
-    setTotal(0);
-    setCounting(true);
-    setApplyTick((v) => v + 1);
-  };
-
-  const onReset = () => {
-    setChr('');
-    setStartText('');
-    setEndText('');
-    setScoreMinText('');
-    setScoreMaxText('');
-    setSeq('');
-    setAssemblyEq('');
-    setRows([]);
-    setColumns([]);
-    setVizRows([]);
-    setOffset(0);
-    setTotal(0);
-    setSortKey('none');
-    setOrder('ASC');
-    setHasApplied(false);
-    setCounting(false);
-    setResetToken((t) => t + 1); // << re-mount τα autocomplete ώστε να αδειάσουν οπτικά
-  };
-
-  // dynamic columns (πρόσθεσε assembly αν επιστρέφεται)
-  const showAssembly = useMemo(
-    () => columns.some((c) => c.toLowerCase() === 'assembly') || rows.some((r) => 'assembly' in r),
-    [columns, rows]
-  );
-  const COLS = useMemo(() => (showAssembly ? [...BASE_COLS, ASM_COL] : BASE_COLS), [showAssembly]);
-
-  // Build filters (shared για search, export, viz)
-  const buildFilterParams = () => {
-    const sp = new URLSearchParams();
-
-    const chrTrim = chr.trim();
-    if (chrTrim) sp.set('chr', chrTrim);
-
-    const s = parseFloat(startText);
-    if (!Number.isNaN(s)) sp.set('start_gte', String(s));
-    const e = parseFloat(endText);
-    if (!Number.isNaN(e)) sp.set('end_lte', String(e));
-
-    // score_min / score_max από τα inputs
-    const smin = parseFloat(scoreMinText);
-    if (!Number.isNaN(smin)) sp.set('score_min', String(smin));
-    const smax = parseFloat(scoreMaxText);
-    if (!Number.isNaN(smax)) sp.set('score_max', String(smax));
-
-    if (seq.trim()) sp.set('seq', seq.trim());
-    if (assemblyEq.trim()) sp.set('assembly_eq', assemblyEq.trim());
-
-    return sp;
-  };
-
-  // ---------------- Fetch rows (fast=1) ----------------
+  // lock assembly from URL on mount / when URL changes
   useEffect(() => {
-    if (!hasApplied) return;
-
-    let cancelled = false;
-    (async () => {
-      setLoadingRows(true);
-      try {
-        const sp = buildFilterParams();
-        sp.set('limit', String(limit));
-        sp.set('offset', String(offset));
-        sp.set('fast', '1'); // rows γρήγορα
-
-        const r = await fetch(`/api/zdna/search?${sp.toString()}`);
-        const j = await r.json();
-        if (!cancelled) {
-          setRows(Array.isArray(j?.rows) ? j.rows : []);
-          setColumns(Array.isArray(j?.columns) ? j.columns : []);
-        }
-      } catch {
-        if (!cancelled) setRows([]);
-      } finally {
-        if (!cancelled) setLoadingRows(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-    // rows αλλάζουν με applyTick/limit/offset
-  }, [hasApplied, applyTick, limit, offset]);
-
-  // ---------------- Fetch count (fast=0, limit=0) ----------------
-  useEffect(() => {
-    if (!hasApplied) return;
-
-    let cancelled = false;
-    (async () => {
-      setCounting(true);
-      try {
-        const sp = buildFilterParams();
-        sp.set('limit', '0');
-        sp.set('offset', '0');
-        sp.set('fast', '0'); // ζήτησε COUNT
-
-        const r = await fetch(`/api/zdna/search?${sp.toString()}`);
-        const j = await r.json();
-        if (!cancelled && typeof j?.total === 'number' && j.total >= 0) {
-          setTotal(j.total);
-        }
-      } catch {
-        /* no-op */
-      } finally {
-        if (!cancelled) setCounting(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-    // count μόνο όταν αλλάζουν φίλτρα (applyTick)
-  }, [hasApplied, applyTick]);
-
-  // ---------------- Fetch viz sample (fast=1, limit=VIZ_LIMIT) ----------------
-  useEffect(() => {
-    if (!hasApplied) return;
-
-    let cancelled = false;
-    (async () => {
-      setVizLoading(true);
-      try {
-        const sp = buildFilterParams();
-        sp.set('limit', String(VIZ_LIMIT));
-        sp.set('offset', '0');
-        sp.set('fast', '1'); // δείγμα γρήγορα
-
-        const r = await fetch(`/api/zdna/search?${sp.toString()}`);
-        const j = await r.json();
-        if (!cancelled) {
-          setVizRows(Array.isArray(j?.rows) ? j.rows : []);
-        }
-      } catch {
-        if (!cancelled) setVizRows([]);
-      } finally {
-        if (!cancelled) setVizLoading(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [hasApplied, applyTick]);
-
-  // sorting (local για τον πίνακα)
-  const handleSortClick = (key: SortKey) => {
-    if (sortKey === key) setOrder((o) => (o === 'ASC' ? 'DESC' : 'ASC'));
-    else {
-      setSortKey(key);
-      setOrder('ASC');
+    setLockedAssembly(lockedAssemblyFromURL);
+    if (lockedAssemblyFromURL) {
+      // requirement: default query when ?assembly=... => ILIKE '%A%', LIMIT 25, OFFSET 0 (no other filters)
+      setSpecies(null);
+      setChr(null); setChrInput('');
+      setStartMin(''); setStartMax('');
+      setEndMin('');   setEndMax('');
+      setScoreMin(''); setScoreMax('');
+      setContains('A');
+      setPage(0);
+      setRpp(DEFAULT_PAGE_SIZE);
     }
-  };
+  }, [lockedAssemblyFromURL]);
 
-  const sortedRows = useMemo(() => {
-    if (sortKey === 'none') return rows;
-    const col = COLS.find((c) => c.key === sortKey);
-    if (!col) return rows.slice();
+  const hasQueryContext = Boolean(species) || Boolean(lockedAssembly);
 
-    const dir = order === 'ASC' ? 1 : -1;
-    const arr = rows.slice();
+  /* ---------------------------- Autocomplete: species ---------------------------- */
+  // Debounce species input
+  const debouncedSpeciesInput = useDebounce(speciesInput, 300);
 
-    arr.sort((a, b) => {
-      const av = a[col.api], bv = b[col.api];
-      if (col.numeric) {
-        const an = Number(av), bn = Number(bv);
-        if (Number.isNaN(an) && Number.isNaN(bn)) return 0;
-        if (Number.isNaN(an)) return -dir;
-        if (Number.isNaN(bn)) return dir;
-        return an < bn ? -dir : an > bn ? dir : 0;
-      }
-      return String(av ?? '').localeCompare(String(bv ?? '')) * dir;
-    });
-    return arr;
-  }, [rows, COLS, sortKey, order]);
+  // Memoized species search function
+  const searchSpecies = useCallback(async (prefix: string): Promise<KV[]> => {
+    // Return empty array if input is too short
+    if (prefix.length < 2) return [];
 
-  // -------- Export (menu) --------
-  const exportData = async (fmt: 'csv' | 'tsv' | 'json' | 'xml' | 'xlsx') => {
-    const sp = buildFilterParams();
-    sp.set('limit', String(limit));
-    sp.set('offset', String(offset));
-    sp.set('fmt', fmt);
+    // Check cache first
+    const cacheKey = prefix.toLowerCase();
+    if (speciesSearchCache.has(cacheKey)) {
+      return speciesSearchCache.get(cacheKey)!;
+    }
+
+    // Try tax_names table first
+    let sql = `
+      SELECT tax_name AS label 
+      FROM tax_names 
+      WHERE lower(tax_name) LIKE ${q(prefix.toLowerCase() + '%')} 
+      ORDER BY 1 
+      LIMIT ${AUTOCOMPLETE_LIMIT}
+    `;
 
     try {
-      const r = await fetch(`/api/zdna/export?${sp.toString()}`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      const ext = fmt === 'xlsx' ? 'xlsx' : fmt;
-      a.href = url;
-      a.download = `zdna_export.${ext}`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error('[explorer] export failed', e);
-    } finally {
-      setExportAnchor(null);
-    }
-  };
-
-  // =========================
-  // ====== Visualizations ===
-  // =========================
-
-  // Defensive helpers
-  const toNum = (v: any) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : NaN;
-  };
-
-  // 1) Scatter/Manhattan: Start vs Score
-  const manhattanData = useMemo(() => {
-    const pts: [number, number][] = [];
-    for (const r of vizRows) {
-      const x = toNum(r['Start']); // ή mid-point
-      const y = toNum(r[SCORE_KEY]);
-      if (Number.isFinite(x) && Number.isFinite(y)) pts.push([x, y]);
-    }
-    return pts.sort((a, b) => a[0] - b[0]);
-  }, [vizRows]);
-
-  const manhattanOption = useMemo(() => {
-    return {
-      title: { text: 'Z‑DNA Score vs Genomic Position', left: 'center' },
-      tooltip: { trigger: 'item', formatter: (p: any) => `Start: ${p.value[0]}<br/>Score: ${p.value[1]}` },
-      xAxis: { type: 'value', name: 'Start' },
-      yAxis: { type: 'value', name: 'Score' },
-      series: [{
-        name: 'Score',
-        type: 'scatter',
-        symbolSize: 6,
-        data: manhattanData,
-        large: true,
-      }],
-      grid: { left: 60, right: 20, top: 50, bottom: 50 }
-    };
-  }, [manhattanData]);
-
-  // 2) Histogram score
-  const scoreHist = useMemo(() => {
-    const values: number[] = [];
-    for (const r of vizRows) {
-      const s = toNum(r[SCORE_KEY]);
-      if (Number.isFinite(s)) values.push(s);
-    }
-    if (values.length === 0) return { bins: [], counts: [] };
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const binCount = 20;
-    const width = (max - min) > 0 ? (max - min) / binCount : 1;
-    const bins = Array.from({ length: binCount }, (_, i) => min + i * width);
-    const counts = new Array(binCount).fill(0);
-    for (const v of values) {
-      const idx = Math.min(binCount - 1, Math.max(0, Math.floor((v - min) / width)));
-      counts[idx]++;
-    }
-    const labels = bins.map((b, i) => `${b.toFixed(1)} – ${(b + width).toFixed(1)}`);
-    return { bins: labels, counts };
-  }, [vizRows]);
-
-  const scoreHistOption = useMemo(() => ({
-    title: { text: 'Score Histogram', left: 'center' },
-    tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: scoreHist.bins, axisLabel: { rotate: 45 } },
-    yAxis: { type: 'value', name: 'Count' },
-    series: [{ type: 'bar', data: scoreHist.counts }],
-    grid: { left: 60, right: 20, top: 50, bottom: 80 }
-  }), [scoreHist]);
-
-  // 3) Heatmap: Position bins × Score bins
-  const heatmap = useMemo(() => {
-    const xs: number[] = [];
-    const ys: number[] = [];
-    const pts: { x: number; y: number }[] = [];
-    for (const r of vizRows) {
-      const x = toNum(r['Start']);
-      const y = toNum(r[SCORE_KEY]);
-      if (Number.isFinite(x) && Number.isFinite(y)) {
-        xs.push(x); ys.push(y); pts.push({ x, y });
+      const results = await runSQL<KV>(sql);
+      if (results.length) {
+        speciesSearchCache.set(cacheKey, results);
+        return results;
       }
-    }
-    if (pts.length === 0) return { xLabels: [], yLabels: [], data: [] as any[] };
-
-    const xmin = Math.min(...xs), xmax = Math.max(...xs);
-    const xrange = Math.max(1, xmax - xmin);
-    const xBins = Math.min(50, Math.max(5, Math.floor(xrange / 10000))); // δυναμικός αριθμός bins
-    const xw = xrange / xBins;
-
-    const ymin = Math.min(...ys), ymax = Math.max(...ys);
-    const yBins = 20;
-    const yw = (ymax - ymin || 1) / yBins;
-
-    const counts = Array.from({ length: yBins }, () => new Array(xBins).fill(0));
-    for (const p of pts) {
-      const xi = Math.min(xBins - 1, Math.max(0, Math.floor((p.x - xmin) / xw)));
-      const yi = Math.min(yBins - 1, Math.max(0, Math.floor((p.y - ymin) / yw)));
-      counts[yi][xi]++;
+    } catch {
+      // Fallback to metadata if tax_names fails
     }
 
-    const xLabels = Array.from({ length: xBins }, (_, i) => Math.round(xmin + i * xw));
-    const yLabels = Array.from({ length: yBins }, (_, i) => (ymin + i * yw).toFixed(1));
+    // Fallback: search in metadata
+    sql = `
+      SELECT DISTINCT tax_name AS label 
+      FROM metadata 
+      WHERE lower(tax_name) LIKE ${q(prefix.toLowerCase() + '%')} 
+      ORDER BY 1 
+      LIMIT ${AUTOCOMPLETE_LIMIT}
+    `;
 
-    const data: [number, number, number][] = [];
-    for (let yi = 0; yi < yBins; yi++) {
-      for (let xi = 0; xi < xBins; xi++) data.push([xi, yi, counts[yi][xi]]);
+    const results = await runSQL<KV>(sql);
+    speciesSearchCache.set(cacheKey, results);
+    return results;
+  }, []);
+
+  // Species autocomplete effect
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchSpecies = async () => {
+      setLoadingSpecies(true);
+      try {
+        const prefix = debouncedSpeciesInput.trim();
+        if (prefix.length < 2) {
+          setSpeciesOpts([]);
+          return;
+        }
+
+        const results = await searchSpecies(prefix);
+        if (!cancelled) {
+          setSpeciesOpts(results);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingSpecies(false);
+        }
+      }
+    };
+
+    fetchSpecies();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedSpeciesInput, searchSpecies]);
+
+  /* -------------------------- Autocomplete: chromosome -------------------------- */
+  useEffect(() => {
+    if (!hasQueryContext) { setChrOpts([]); return; }
+    let dead = false;
+    (async () => {
+      setLoadingChr(true);
+      try {
+        const prefix = chrInput.trim().toLowerCase();
+        let where: string;
+
+        if (lockedAssembly) {
+          where = `assembly = ${q(lockedAssembly)}`;
+        } else {
+          where = `assembly IN (SELECT assembly FROM metadata WHERE tax_name = ${q(species!)})`;
+        }
+
+        const andPrefix = prefix ? `AND lower("Chromosome") LIKE ${q(prefix + '%')}` : '';
+        const sql = `
+          SELECT DISTINCT "Chromosome" AS label
+          FROM data
+          WHERE ${where} ${andPrefix}
+          ORDER BY 1
+          LIMIT ${AUTOCOMPLETE_LIMIT}
+        `;
+        const opts = await runSQL<KV>(sql);
+        if (!dead) setChrOpts(opts);
+      } finally {
+        if (!dead) setLoadingChr(false);
+      }
+    })();
+    return () => { dead = true; };
+  }, [species, lockedAssembly, chrInput, hasQueryContext]);
+
+  /* -------------------------------- WHERE builder ------------------------------- */
+  const whereSql = useMemo(() => {
+    const parts: string[] = [];
+    if (!species && !lockedAssembly) return '1=0';
+
+    if (species)        parts.push(`assembly IN (SELECT assembly FROM metadata WHERE tax_name = ${q(species)})`);
+    if (lockedAssembly) parts.push(`assembly = ${q(lockedAssembly)}`);
+
+    if (chr) parts.push(`"Chromosome" = ${q(chr)}`);
+    if (startMin) parts.push(`"Start" >= ${Number(startMin)}`);
+    if (startMax) parts.push(`"Start" <= ${Number(startMax)}`);
+    if (endMin)   parts.push(`"End"   >= ${Number(endMin)}`);
+    if (endMax)   parts.push(`"End"   <= ${Number(endMax)}`);
+    if (scoreMin) parts.push(`"Z-DNA Score" >= ${Number(scoreMin)}`);
+    if (scoreMax) parts.push(`"Z-DNA Score" <= ${Number(scoreMax)}`);
+    if (contains.trim()) {
+      const needle = contains.trim().replace(/'/g, "''");
+      parts.push(`"Sequence" ILIKE ${q('%' + needle + '%')}`);
     }
-    return { xLabels, yLabels, data };
-  }, [vizRows]);
+    return parts.join(' AND ');
+  }, [species, lockedAssembly, chr, startMin, startMax, endMin, endMax, scoreMin, scoreMax, contains]);
 
-  const heatmapOption = useMemo(() => ({
-    title: { text: 'Density Heatmap (Position × Score)', left: 'center' },
-    tooltip: { position: 'top' },
-    xAxis: { type: 'category', data: heatmap.xLabels, name: 'Start (bin)', axisLabel: { hideOverlap: true } },
-    yAxis: { type: 'category', data: heatmap.yLabels, name: 'Score (bin)' },
-    visualMap: { min: 0, max: Math.max(1, ...heatmap.data.map(d => d[2])), orient: 'horizontal', left: 'center', bottom: 0 },
-    series: [{ type: 'heatmap', data: heatmap.data }],
-    grid: { left: 60, right: 30, top: 50, bottom: 60 }
-  }), [heatmap]);
+  /* --------------------------------- Results SQL -------------------------------- */
+  async function fetchRowsAndCount(p = page, size = rpp) {
+    if (!hasQueryContext) return;
+    setLoading(true);
+    const offset = p * size;
 
-  // 4) Length histogram (End-Start+1)
-  const lenHist = useMemo(() => {
-    const lens: number[] = [];
-    for (const r of vizRows) {
-      const s = toNum(r['Start']);
-      const e = toNum(r['End']);
-      if (Number.isFinite(s) && Number.isFinite(e) && e >= s) lens.push(e - s + 1);
+    const sqlRows = `
+      SELECT "Chromosome","Start","End","Z-DNA Score" AS Score,"Sequence"
+      FROM data
+      WHERE ${whereSql}
+      ORDER BY "Z-DNA Score" DESC
+      LIMIT ${size} OFFSET ${offset}
+    `;
+    const sqlCount = `
+      SELECT COUNT(*) AS n
+      FROM data
+      WHERE ${whereSql}
+    `;
+    try {
+      const [r, c] = await Promise.all([
+        runSQL<Row>(sqlRows),
+        runSQL<{ n: number }>(sqlCount),
+      ]);
+      setRows(r);
+      setTotal(Number(getVal(c?.[0], 'n') ?? 0));
+    } finally {
+      setLoading(false);
     }
-    if (lens.length === 0) return { bins: [], counts: [] };
-    const min = Math.min(...lens), max = Math.max(...lens);
-    const binCount = 20;
-    const width = (max - min) > 0 ? (max - min) / binCount : 1;
-    const bins = Array.from({ length: binCount }, (_, i) => min + i * width);
-    const counts = new Array(binCount).fill(0);
-    for (const v of lens) {
-      const idx = Math.min(binCount - 1, Math.max(0, Math.floor((v - min) / width)));
-      counts[idx]++;
+  }
+
+  function onApply() {
+    setPage(0);
+    fetchRowsAndCount(0, rpp);
+    if (tab === 'viz') fetchViz();
+  }
+  function onReset() {
+    setChr(null); setChrInput('');
+    setStartMin(''); setStartMax('');
+    setEndMin('');   setEndMax('');
+    setScoreMin(''); setScoreMax('');
+    setContains('');
+    setRows([]); setTotal(0);
+  }
+
+  useEffect(() => {
+    if (!hasQueryContext) return;
+    fetchRowsAndCount(page, rpp);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, rpp, whereSql, hasQueryContext]);
+
+  /* ------------------------------------ Export ----------------------------------- */
+  async function exportAll(fmt: 'csv'|'tsv'|'json'|'xml'|'xlsx') {
+    if (!hasQueryContext) return;
+
+    const cnt = await runSQL<{ n: number }>(`SELECT COUNT(*) AS n FROM data WHERE ${whereSql}`);
+    const totalRows = Number(getVal(cnt?.[0], 'n') ?? 0);
+    if (totalRows === 0) return;
+
+    if (totalRows > MAX_EXPORT_ROWS) {
+      alert(`This query would return ${fmtNum(totalRows)} rows.\nPlease use server-side export for very large downloads.\n(Current client cap: ${fmtNum(MAX_EXPORT_ROWS)} rows)`);
+      return;
     }
-    const labels = bins.map((b, i) => `${Math.round(b)}–${Math.round(b + width)}`);
-    return { bins: labels, counts };
-  }, [vizRows]);
 
-  const lenHistOption = useMemo(() => ({
-    title: { text: 'Length Histogram (End‑Start+1)', left: 'center' },
-    tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: lenHist.bins, axisLabel: { rotate: 45 } },
-    yAxis: { type: 'value', name: 'Count' },
-    series: [{ type: 'bar', data: lenHist.counts }],
-    grid: { left: 60, right: 20, top: 50, bottom: 80 }
-  }), [lenHist]);
+    const selectSql = `
+      SELECT "Chromosome","Start","End","Z-DNA Score" AS Score,"Sequence"
+      FROM data
+      WHERE ${whereSql}
+      ORDER BY "Z-DNA Score" DESC
+    `;
 
-  // (Προαιρετικό) 5) k‑mer bar chart (3‑mers) — μπορεί να προστεθεί εύκολα:
-  // const kmerOption = useMemo(() => { ... }, [vizRows]);
+    let offset = 0;
+    const all: Row[] = [];
+    while (offset < totalRows) {
+      const batchSql = `${selectSql} LIMIT ${BATCH_EXPORT} OFFSET ${offset}`;
+      // eslint-disable-next-line no-await-in-loop
+      const part = await runSQL<Row>(batchSql);
+      all.push(...part);
+      offset += BATCH_EXPORT;
+      if (offset >= MAX_EXPORT_ROWS) break;
+    }
 
-  // ---------------- Render ----------------
+    const baseName = `zdna_export_${Date.now()}`;
+    switch (fmt) {
+      case 'csv':  downloadBlob(buildCsv(all, ','), `${baseName}.csv`, 'text/csv;charset=utf-8'); break;
+      case 'tsv':  downloadBlob(buildCsv(all, '\t'), `${baseName}.tsv`, 'text/tab-separated-values;charset=utf-8'); break;
+      case 'json': downloadBlob(buildJson(all), `${baseName}.json`, 'application/json;charset=utf-8'); break;
+      case 'xml':  downloadBlob(buildXml(all), `${baseName}.xml`, 'application/xml;charset=utf-8'); break;
+      case 'xlsx': downloadBlob(buildExcelHtml(all), `${baseName}.xls`, 'application/vnd.ms-excel;charset=utf-8'); break;
+      default: break;
+    }
+  }
+
+  /* -------------------------------- Visualizations ------------------------------- */
+
+  const [vizLoading, setVizLoading] = useState(false);
+  const [hist, setHist] = useState<{ bin: number; n: number }[]>([]);
+  const [density, setDensity] = useState<{ start: number; n: number }[]>([]);
+  const [scatter, setScatter] = useState<{ x: number; y: number }[]>([]);
+  const [kmers, setKmers] = useState<{ motif: string; n: number }[]>([]);
+  const [boxRows, setBoxRows] = useState<{ chr: string; min: number; q1: number; median: number; q3: number; max: number }[]>([]);
+  const [lenScore, setLenScore] = useState<{ len: number; score: number }[]>([]); // NEW
+  const [genomicDist, setGenomicDist] = useState<{ pos: number; score: number }[]>([]); // NEW
+
+  async function fetchViz() {
+    if (!hasQueryContext) return;
+    setVizLoading(true);
+    try {
+      // 1) Histogram (no WITH; subquery)
+      const sqlHist = `
+        SELECT CAST(FLOOR(score/10)*10 AS INT) AS "bin", COUNT(*) AS "n"
+        FROM (
+          SELECT "Z-DNA Score" AS score
+          FROM data
+          WHERE ${whereSql}
+        ) f
+        GROUP BY "bin"
+        ORDER BY "bin"
+      `;
+
+      // 2) Density (100kb windows) – relies only on whereSql (no double AND)
+      const sqlDensity = chr ? `
+        SELECT FLOOR("Start"/100000)*100000 AS "start", COUNT(*) AS "n"
+        FROM data
+        WHERE ${whereSql}
+        GROUP BY 1
+        ORDER BY 1
+      ` : null;
+
+      // 3) Start vs Score (per chr) – keep it light with LIMIT
+      const sqlScatter = chr ? `
+        SELECT "Start" AS "x", "Z-DNA Score" AS "y"
+        FROM data
+        WHERE ${whereSql}
+        ORDER BY "Start"
+        LIMIT ${SCATTER_SAMPLE}
+      ` : null;
+
+      // 4) Top central 8‑mers
+      const sqlGenomicDist = `
+        SELECT "Start" as pos, "Z-DNA Score" as score 
+        FROM data
+        WHERE ${whereSql}
+        ORDER BY "Start"
+        LIMIT ${SCATTER_SAMPLE}
+      `;
+
+      // 5) Box stats per chromosome (no WITH; subquery)
+      const sqlBox = `
+        SELECT "chr",
+               MIN(s)            AS "min",
+               quantile(s,0.25)  AS "q1",
+               quantile(s,0.50)  AS "median",
+               quantile(s,0.75)  AS "q3",
+               MAX(s)            AS "max"
+        FROM (
+          SELECT "Chromosome" AS "chr", "Z-DNA Score" AS s
+          FROM data
+          WHERE ${whereSql}
+        ) f
+        GROUP BY "chr"
+        ORDER BY "median" DESC
+        LIMIT 15
+      `;
+
+      // 6) Length vs Score (sampled with LIMIT)
+      const sqlLenScore = `
+        SELECT ("End" - "Start" + 1) AS "len", "Z-DNA Score" AS "score"
+        FROM data
+        WHERE ${whereSql}
+        ORDER BY "Start"
+        LIMIT ${SCATTER_SAMPLE}
+      `;
+
+      const results = await Promise.allSettled([
+        runSQL<{ bin: number; n: number }>(sqlHist),
+        sqlDensity ? runSQL<{ start: number; n: number }>(sqlDensity) : Promise.resolve([]),
+        sqlScatter ? runSQL<{ x: number; y: number }>(sqlScatter) : Promise.resolve([]),
+        runSQL<{ motif: string; n: number }>(sqlGenomicDist),
+        runSQL<{ chr: string; min: number; q1: number; median: number; q3: number; max: number }>(sqlBox),
+        runSQL<{ len: number; score: number }>(sqlLenScore),
+      ]);
+
+      const ok = <T,>(i: number, def: T): T =>
+        results[i].status === 'fulfilled' ? (results[i] as PromiseFulfilledResult<T>).value : def;
+
+      setHist(ok(0, []).map(d => ({ bin: Number(getVal(d, 'bin')), n: Number(getVal(d, 'n')) }))
+        .filter(v => Number.isFinite(v.bin) && Number.isFinite(v.n)));
+
+      setDensity(ok(1, []).map(d => ({ start: Number(getVal(d, 'start')), n: Number(getVal(d, 'n')) }))
+        .filter(v => Number.isFinite(v.start) && Number.isFinite(v.n)));
+
+      setScatter(ok(2, []).map(d => ({ x: Number(getVal(d, 'x')), y: Number(getVal(d, 'y')) }))
+        .filter(v => Number.isFinite(v.x) && Number.isFinite(v.y)));
+
+      setGenomicDist(ok(3, []).map(d => ({
+        pos: Number(getVal(d, 'pos')),
+        score: Number(getVal(d, 'score'))
+      })).filter(v => Number.isFinite(v.pos) && Number.isFinite(v.score)));
+
+      setBoxRows(ok(4, []).map(d => ({
+        chr:    String(getVal(d, 'chr')),
+        min:    Number(getVal(d, 'min')),
+        q1:     Number(getVal(d, 'q1')),
+        median: Number(getVal(d, 'median')),
+        q3:     Number(getVal(d, 'q3')),
+        max:    Number(getVal(d, 'max')),
+      })).filter(v => v.chr && [v.min, v.q1, v.median, v.q3, v.max].every(Number.isFinite)));
+
+      setLenScore(ok(5, []).map(d => ({ len: Number(getVal(d, 'len')), score: Number(getVal(d, 'score')) }))
+        .filter(v => Number.isFinite(v.len) && Number.isFinite(v.score)));
+
+    } finally {
+      setVizLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (tab !== 'viz') return;
+    if (!hasQueryContext) return;
+    fetchViz();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, whereSql, chr, hasQueryContext]);
+
+  /* ------------------------------- ECharts options ------------------------------ */
+
+  const histOpt = useMemo(() => {
+    const x = hist.map(d => Number(d.bin));
+    const y = hist.map(d => Number(d.n));
+    return {
+      tooltip: { trigger: 'axis' },
+      xAxis: { type: 'category', data: x, name: 'Score bin' },
+      yAxis: { type: 'value', name: 'Count' },
+      series: [{ type: 'bar', data: y }],
+      grid: { left: 50, right: 20, top: 30, bottom: 40 },
+    };
+  }, [hist]);
+
+  const densityOpt = useMemo(() => {
+    if (!density.length) return null;
+    return {
+      tooltip: { trigger: 'axis' },
+      xAxis: { type: 'value', name: `${chr ?? ''} (window start)`, axisLabel: { formatter: (v: number) => fmtNum(v) } },
+      yAxis: { type: 'value', name: 'Sites / 100kb' },
+      series: [{ type: 'bar', data: density.map(d => [d.start, d.n]) }],
+      grid: { left: 60, right: 20, top: 30, bottom: 50 },
+    };
+  }, [density, chr]);
+
+  const scatterOpt = useMemo(() => {
+    if (!scatter.length) return null;
+    return {
+      tooltip: { trigger: 'item', formatter: (p: any) => `Start: ${fmtNum(p.value[0])}<br/>Score: ${Number(p.value[1]).toFixed(2)}` },
+      xAxis: { type: 'value', name: `${chr ?? ''} Start`, axisLabel: { formatter: (v: number) => fmtNum(v) } },
+      yAxis: { type: 'value', name: 'Z‑DNA Score' },
+      series: [{ type: 'scatter', symbolSize: 5, data: scatter.map(d => [d.x, d.y]) }],
+      grid: { left: 60, right: 20, top: 30, bottom: 50 },
+    };
+  }, [scatter, chr]);
+
+  /*
+  const kmerOpt = useMemo(() => {
+    const x = kmers.map(k => k.motif);
+    const y = kmers.map(k => k.n);
+    return {
+      tooltip: { trigger: 'axis' },
+      xAxis: { type: 'category', data: x, axisLabel: { rotate: 45 } },
+      yAxis: { type: 'value', name: 'Count' },
+      series: [{ type: 'bar', data: y }],
+      grid: { left: 50, right: 20, top: 30, bottom: 80 },
+    };
+  }, [kmers]);
+*/
+  const boxOpt = useMemo(() => {
+    if (!boxRows.length) return null;
+    const cats = boxRows.map(b => b.chr);
+    const data = boxRows.map(b => [b.min, b.q1, b.median, b.q3, b.max]);
+    return {
+      tooltip: { trigger: 'item' },
+      xAxis: { type: 'category', data: cats, axisLabel: { rotate: 45 } },
+      yAxis: { type: 'value', name: 'Z‑DNA Score' },
+      series: [{ type: 'boxplot', data }],
+      grid: { left: 60, right: 20, top: 30, bottom: 80 },
+    };
+  }, [boxRows]);
+
+  const lenScoreOpt = useMemo(() => {
+    if (!lenScore.length) return null;
+    return {
+      tooltip: { trigger: 'item', formatter: (p: any) => `Length: ${fmtNum(p.value[0])} bp<br/>Score: ${Number(p.value[1]).toFixed(2)}` },
+      xAxis: { type: 'value', name: 'Length (bp)', axisLabel: { formatter: (v: number) => fmtNum(v) } },
+      yAxis: { type: 'value', name: 'Z‑DNA Score' },
+      series: [{ type: 'scatter', symbolSize: 5, data: lenScore.map(d => [d.len, d.score]) }],
+      grid: { left: 60, right: 20, top: 30, bottom: 50 },
+    };
+  }, [lenScore]);
+
+  const genomicDistOpt = useMemo(() => {
+    if (!genomicDist.length) return null;
+    return {
+      tooltip: {
+        trigger: 'axis',
+        formatter: (params: any) => {
+          const p = params[0];
+          return `Position: ${fmtNum(p.value[0])}<br/>Score: ${p.value[1].toFixed(2)}`;
+        }
+      },
+      xAxis: {
+        type: 'value',
+        name: 'Genomic Position',
+        axisLabel: { formatter: (v: number) => fmtNum(v) }
+      },
+      yAxis: {
+        type: 'value',
+        name: 'Z-DNA Score'
+      },
+      series: [{
+        type: 'scatter',
+        symbolSize: 8,
+        data: genomicDist.map(d => [d.pos, d.score]),
+        itemStyle: {
+          color: '#4e79a7'
+        }
+      }],
+      grid: { 
+        left: 60,
+        right: 20, 
+        top: 30, 
+        bottom: 50,
+        containLabel: true
+      }
+    };
+  }, [genomicDist]);
+
+  /* -------------------------------------- UI ------------------------------------- */
+
   return (
     <Box sx={{ p: 2 }}>
-      {/* FILTER BAR */}
-      <Paper elevation={1} sx={{ p: 2, mb: 2 }}>
-        <Toolbar disableGutters sx={{ gap: 2, flexWrap: 'wrap' }}>
-          {/* Chromosome (Autocomplete, επηρεάζεται από Assembly) */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Typography variant="body2" sx={{ minWidth: 92 }}>Chromosome</Typography>
-            <Box sx={{ width: 240 }}>
-              <ChromosomeAutocomplete
-                key={`chr-${resetToken}`}
-                value={chr}
-                onChange={(v) => setChr((v || '').trim())}
-                assemblyEq={assemblyEq}
-                label=""
-                placeholder="Type to search…"
-                serverLimit={50}
-                minServerChars={2}
-              />
-            </Box>
-          </Box>
+      <Typography variant="h6" sx={{ mb: 2 }}>Sequence search</Typography>
 
-          {/* Start / End */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Typography variant="body2" sx={{ minWidth: 36 }}>Start ≥</Typography>
-            <TextField size="small" placeholder="Start" value={startText}
-              onChange={(e) => setStartText(e.target.value)} sx={{ width: 120 }}
-              inputProps={{ inputMode: 'numeric' }} />
-          </Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Typography variant="body2" sx={{ minWidth: 32 }}>End ≤</Typography>
-            <TextField size="small" placeholder="End" value={endText}
-              onChange={(e) => setEndText(e.target.value)} sx={{ width: 120 }}
-              inputProps={{ inputMode: 'numeric' }} />
-          </Box>
-
-          {/* Z‑DNA Score min/max */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Typography variant="body2" sx={{ minWidth: 118 }}>Z‑DNA Score ≥</Typography>
-            <TextField
-              size="small"
-              placeholder="Score min"
-              value={scoreMinText}
-              onChange={(e) => setScoreMinText(e.target.value)}
-              sx={{ width: 120 }}
-              inputProps={{ inputMode: 'decimal' }}
+      {/* Species + Locked Assembly banner */}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Grid container spacing={2} alignItems="center">
+          <Grid item xs={12} md={8} lg={6}>
+            <Autocomplete
+              options={speciesOpts}
+              loading={loadingSpecies}
+              value={species ? { label: species } : null}
+              onChange={(_, v) => { setSpecies(v?.label ?? null); setChr(null); setChrInput(''); }}
+              onInputChange={(_, v) => setSpeciesInput(v)}
+              filterOptions={(x) => x}
+              getOptionLabel={(o) => o?.label ?? ''}
+              sx={{ minWidth: 520 }}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  fullWidth
+                  label="Species"  // Changed from "Species (tax_name)"
+                  helperText="Type at least 2 characters to search"
+                />
+              )}
             />
-          </Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Typography variant="body2" sx={{ minWidth: 114 }}>Z‑DNA Score ≤</Typography>
-            <TextField
-              size="small"
-              placeholder="Score max"
-              value={scoreMaxText}
-              onChange={(e) => setScoreMaxText(e.target.value)}
-              sx={{ width: 120 }}
-              inputProps={{ inputMode: 'decimal' }}
-            />
-          </Box>
-
-          {/* Sequence contains */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Typography variant="body2" sx={{ minWidth: 132 }}>Sequence contains</Typography>
-            <TextField
-              size="small"
-              placeholder="Substring"
-              value={seq}
-              onChange={(e) => setSeq(e.target.value)}
-              sx={{ width: 260 }}
-            />
-          </Box>
-
-          {/* Assembly (Autocomplete) */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Typography variant="body2" sx={{ minWidth: 78 }}>Assembly</Typography>
-            <Box sx={{ width: 260 }}>
-              <AssemblyAutocomplete
-                key={`asm-${resetToken}`}
-                value={assemblyEq}
-                onChange={(v) => setAssemblyEq((v || '').trim())}
-                label=""
-                placeholder="e.g. GCA_000002515.1"
-                limit={50}
-              />
-            </Box>
-          </Box>
-
-          {/* Actions */}
-          <Button variant="contained" onClick={onApply} disabled={!canApply || loadingRows}>APPLY</Button>
-          <Button variant="outlined" onClick={onReset} disabled={loadingRows}>RESET</Button>
-
-          {/* Export menu (CSV/TSV/JSON/XML/XLSX) */}
-          <IconButton color="primary" onClick={(e) => setExportAnchor(e.currentTarget)} disabled={loadingRows}>
-            <DownloadIcon />
-          </IconButton>
-          <Menu
-            open={Boolean(exportAnchor)}
-            anchorEl={exportAnchor}
-            onClose={() => setExportAnchor(null)}
-          >
-            <MenuItem onClick={() => exportData('csv')}>Export CSV</MenuItem>
-            <MenuItem onClick={() => exportData('tsv')}>Export TSV</MenuItem>
-            <MenuItem onClick={() => exportData('json')}>Export JSON</MenuItem>
-            <MenuItem onClick={() => exportData('xml')}>Export XML</MenuItem>
-            <MenuItem onClick={() => exportData('xlsx')}>Export Excel (.xlsx)</MenuItem>
-          </Menu>
-        </Toolbar>
+          </Grid>
+          <Grid item xs={12} md={4} lg={6} sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+            {species && <Chip color="primary" label="Select" sx={{ display: 'none' }} />}
+            {lockedAssembly && <Chip color="secondary" label={`Assembly: ${lockedAssembly}`} />}
+          </Grid>
+        </Grid>
       </Paper>
 
-      {/* TABS */}
-      <Paper elevation={1} sx={{ p: 0 }}>
-        <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="scrollable">
+      {/* Filters */}
+      {hasQueryContext && (
+        <Paper sx={{ p: 2, mb: 2 }}>
+          <Grid container spacing={2} alignItems="center">
+            {/* Chromosome */}
+            <Grid item sx={{ width: 200 }}>
+              <Autocomplete
+                options={chrOpts}
+                loading={loadingChr}
+                value={chr ? { label: chr } : null}
+                onChange={(_, v) => setChr(v?.label ?? null)}
+                onInputChange={(_, v) => setChrInput(v)}
+                filterOptions={(x) => x}
+                getOptionLabel={(o) => o?.label ?? ''}
+                sx={{ minWidth: { xs: '100%', md: 220 } }}
+                renderInput={(params) => (
+                  <TextField {...params} fullWidth label="Chromosome" placeholder="type to search…" />
+                )}
+              />
+            </Grid>
+
+            {/* Start */}
+            <Grid item xs={12} md={3} lg={2}>
+              <TextField fullWidth label="Start ≥" type="number" value={startMin} onChange={(e) => setStartMin(e.target.value)} />
+            </Grid>
+            <Grid item xs={12} md={3} lg={2}>
+              <TextField fullWidth label="Start ≤" type="number" value={startMax} onChange={(e) => setStartMax(e.target.value)} />
+            </Grid>
+
+            {/* End */}
+            <Grid item xs={12} md={3} lg={2}>
+              <TextField fullWidth label="End ≥" type="number" value={endMin} onChange={(e) => setEndMin(e.target.value)} />
+            </Grid>
+            <Grid item xs={12} md={3} lg={2}>
+              <TextField fullWidth label="End ≤" type="number" value={endMax} onChange={(e) => setEndMax(e.target.value)} />
+            </Grid>
+
+            {/* Z-DNA Score */}
+            <Grid item xs={12} md={3} lg={2}>
+              <TextField fullWidth label="Z‑DNA Score ≥" type="number" value={scoreMin} onChange={(e) => setScoreMin(e.target.value)} />
+            </Grid>
+            <Grid item xs={12} md={3} lg={2}>
+              <TextField fullWidth label="Z‑DNA Score ≤" type="number" value={scoreMax} onChange={(e) => setScoreMax(e.target.value)} />
+            </Grid>
+
+            {/* Sequence contains */}
+            <Grid item xs={12} md={6} lg={4}>
+              <TextField fullWidth label="Sequence contains" value={contains} onChange={(e) => setContains(e.target.value)} />
+            </Grid>
+
+            {/* Actions */}
+            <Grid item xs={12} md="auto">
+              <Button variant="contained" onClick={onApply} disabled={!hasQueryContext}>APPLY</Button>
+            </Grid>
+            <Grid item xs={12} md="auto">
+              <Button onClick={onReset} disabled={!hasQueryContext}>RESET</Button>
+            </Grid>
+
+            {/* Export */}
+            <Grid item xs={12} md="auto">
+              <Tooltip title="Export">
+                <span>
+                  <Button startIcon={<DownloadIcon />} variant="outlined" disabled={!hasQueryContext} onClick={(e) => setExportAnchor(e.currentTarget)}>
+                    EXPORT
+                  </Button>
+                </span>
+              </Tooltip>
+              <Menu anchorEl={exportAnchor} open={exportOpen} onClose={() => setExportAnchor(null)}>
+                <MenuItem onClick={() => { setExportAnchor(null); exportAll('csv');  }}>Export CSV</MenuItem>
+                <MenuItem onClick={() => { setExportAnchor(null); exportAll('tsv');  }}>Export TSV</MenuItem>
+                <MenuItem onClick={() => { setExportAnchor(null); exportAll('json'); }}>Export JSON</MenuItem>
+                <MenuItem onClick={() => { setExportAnchor(null); exportAll('xml');  }}>Export XML</MenuItem>
+                <MenuItem onClick={() => { setExportAnchor(null); exportAll('xlsx'); }}>Export Excel</MenuItem>
+              </Menu>
+            </Grid>
+
+            <Grid item xs={12} md="auto">
+              <Tooltip title="Reload suggestions">
+                <IconButton onClick={() => { /* optional */ }}>
+                  <RefreshIcon />
+                </IconButton>
+              </Tooltip>
+            </Grid>
+          </Grid>
+        </Paper>
+      )}
+
+      {/* Tabs */}
+      <Paper sx={{ mb: 2 }}>
+        <Tabs
+          value={tab === 'results' ? 0 : 1}
+          onChange={(_, v) => setTab(v === 0 ? 'results' : 'viz')}
+          variant="scrollable"
+          scrollButtons="auto"
+        >
           <Tab label="Results" />
           <Tab label="Visualizations" />
         </Tabs>
-
-        {/* RESULTS TAB */}
-        {tab === 0 && (
-          <Box sx={{ p: 2 }}>
-            {/* TOP: Found + Pagination */}
-            <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
-              <Typography variant="body2" sx={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
-                {hasApplied ? (
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    Found: <strong>{total > 0 ? total.toLocaleString() : '—'}</strong>
-                    {counting && <CircularProgress size={14} />}
-                  </span>
-                ) : (
-                  'Set filters and press APPLY'
-                )}
-              </Typography>
-              <TablePagination
-                component="div"
-                count={total > 0 ? total : 0}
-                page={page}
-                onPageChange={onPageChange}
-                rowsPerPage={limit}
-                onRowsPerPageChange={onRowsPerPageChange}
-                rowsPerPageOptions={[25, 50, 100]}
-              />
-            </Box>
-
-            {/* Results table */}
-            <TableContainer component={Paper} variant="outlined">
-              <Table stickyHeader size="small">
-                <TableHead>
-                  <TableRow>
-                    {COLS.map((c) => (
-                      <TableCell key={c.key}>
-                        <TableSortLabel
-                          active={sortKey === c.key}
-                          direction={sortKey === c.key ? (order.toLowerCase() as 'asc' | 'desc') : 'asc'}
-                          onClick={() => handleSortClick(c.key as SortKey)}
-                        >
-                          {c.label}
-                        </TableSortLabel>
-                      </TableCell>
-                    ))}
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {sortedRows.map((r, i) => (
-                    <TableRow key={i} hover>
-                      <TableCell>{r['Chromosome']}</TableCell>
-                      <TableCell>{r['Start']}</TableCell>
-                      <TableCell>{r['End']}</TableCell>
-                      <TableCell>{r[SCORE_KEY]}</TableCell>
-                      <TableCell sx={{ fontFamily: 'monospace' }}>{r['Sequence']}</TableCell>
-                      {showAssembly && <TableCell>{r['assembly']}</TableCell>}
-                    </TableRow>
-                  ))}
-                  {sortedRows.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={COLS.length}>
-                        <Box sx={{ p: 3, textAlign: 'center' }}>
-                          <Typography variant="body2" color="text.secondary">
-                            {hasApplied ? 'No rows' : 'Press APPLY to run the search'}
-                          </Typography>
-                        </Box>
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </TableContainer>
-
-            {/* BOTTOM pagination */}
-            <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
-              <TablePagination
-                component="div"
-                count={total > 0 ? total : 0}
-                page={page}
-                onPageChange={onPageChange}
-                rowsPerPage={limit}
-                onRowsPerPageChange={onRowsPerPageChange}
-                rowsPerPageOptions={[25, 50, 100]}
-              />
-            </Box>
-          </Box>
-        )}
-
-        {/* VISUALIZATIONS TAB */}
-        {tab === 1 && (
-          <Box sx={{ p: 2 }}>
-            {!hasApplied ? (
-              <Box sx={{ p: 3, textAlign: 'center' }}>
-                <Typography variant="body2" color="text.secondary">
-                  Set filters and press APPLY to render charts.
-                </Typography>
-              </Box>
-            ) : vizLoading ? (
-              <Box sx={{ p: 3, display: 'flex', justifyContent: 'center' }}>
-                <CircularProgress />
-              </Box>
-            ) : vizRows.length === 0 ? (
-              <Box sx={{ p: 3, textAlign: 'center' }}>
-                <Typography variant="body2" color="text.secondary">
-                  No data for current filters.
-                </Typography>
-              </Box>
-            ) : (
-              <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' } }}>
-                <Paper variant="outlined" sx={{ p: 1 }}>
-                  <ReactECharts option={manhattanOption} style={{ height: 320 }} />
-                </Paper>
-                <Paper variant="outlined" sx={{ p: 1 }}>
-                  <ReactECharts option={scoreHistOption} style={{ height: 320 }} />
-                </Paper>
-                <Paper variant="outlined" sx={{ p: 1, gridColumn: { xs: 'auto', md: '1 / span 2' } }}>
-                  <ReactECharts option={heatmapOption} style={{ height: 360 }} />
-                </Paper>
-                <Paper variant="outlined" sx={{ p: 1 }}>
-                  <ReactECharts option={lenHistOption} style={{ height: 320 }} />
-                </Paper>
-                {/* Προαιρετικά:
-                <Paper variant="outlined" sx={{ p: 1 }}>
-                  <ReactECharts option={kmerOption} style={{ height: 320 }} />
-                </Paper>
-                */}
-              </Box>
-            )}
-          </Box>
-        )}
       </Paper>
 
-      {/* Loading overlay για rows (Results) */}
-      <Backdrop open={loadingRows} sx={{ zIndex: (t) => t.zIndex.drawer + 1 }}>
-        <CircularProgress color="inherit" />
-      </Backdrop>
+      {/* Results */}
+      {tab === 'results' && (
+        <Paper>
+          <Box sx={{ px: 2, py: 1, display: 'flex', alignItems: 'center' }}>
+            <Typography variant="subtitle2" sx={{ flex: 1 }}>Results</Typography>
+            {loading && <CircularProgress size={18} />}
+          </Box>
+
+          <TablePagination
+            component="div"
+            count={total}
+            page={page}
+            onPageChange={(_, p) => setPage(p)}
+            rowsPerPage={rpp}
+            onRowsPerPageChange={(e) => { setRpp(parseInt(e.target.value, 10)); setPage(0); }}
+            rowsPerPageOptions={PAGE_SIZE_OPTIONS}
+          />
+
+          <TableContainer>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Chromosome</TableCell>
+                  <TableCell align="right">Start</TableCell>
+                  <TableCell align="right">End</TableCell>
+                  <TableCell align="right">Z‑DNA Score</TableCell>
+                  <TableCell>Sequence</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {rows.map((r, i) => (
+                  <TableRow key={`${r.Chromosome}-${r.Start}-${i}`}>
+                    <TableCell>{r.Chromosome}</TableCell>
+                    <TableCell align="right">{fmtNum(r.Start)}</TableCell>
+                    <TableCell align="right">{fmtNum(r.End)}</TableCell>
+                    <TableCell align="right">{Number(r.Score).toFixed?.(2) ?? r.Score}</TableCell>
+                    <TableCell sx={{ fontFamily: 'ui-monospace, Consolas, monospace' }}>{r.Sequence}</TableCell>
+                  </TableRow>
+                ))}
+                {!rows.length && (
+                  <TableRow>
+                    <TableCell colSpan={5} align="center" sx={{ py: 6, color: 'text.secondary' }}>
+                      {hasQueryContext ? 'No rows — refine filters and click APPLY' : 'Select Species or open with ?assembly=...'}
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </TableContainer>
+
+          <TablePagination
+            component="div"
+            count={total}
+            page={page}
+            onPageChange={(_, p) => setPage(p)}
+            rowsPerPage={rpp}
+            onRowsPerPageChange={(e) => { setRpp(parseInt(e.target.value, 10)); setPage(0); }}
+            rowsPerPageOptions={PAGE_SIZE_OPTIONS}
+          />
+        </Paper>
+      )}
+
+      {/* Visualizations */}
+      {tab === 'viz' && (
+<Paper sx={{ p: 2 }}>
+  {/* ΕΠΙΒΟΛΗ 100% πλάτους στα wrappers του echarts-for-react */}
+  <Box sx={{
+    '& .echarts-for-react': { width: '100% !important' },
+    '& .echarts-for-react > div': { width: '100% !important' }
+  }}>
+    {/* Row 1 */}
+    <Grid container spacing={2} sx={{ mb: 2 }}>
+      <Grid item xs={12} md={6} sx={{ width: '45%' }}>
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Z-DNA Score — Histogram</Typography>
+        <FullWidthChart option={histOpt} height={400} deps={[tab, histOpt]} />
+      </Grid>
+      <Grid item xs={12} md={6} sx={{ width: '45%' }}>
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Genomic Distribution</Typography>
+        {genomicDistOpt ? (
+          <FullWidthChart option={genomicDistOpt} height={400} deps={[tab, genomicDistOpt]} />
+        ) : (
+          <Box sx={{ p: 2, border: '1px dashed', borderColor: 'divider', color: 'text.secondary', height: 400 }}>
+            No data available for genomic distribution plot.
+          </Box>
+        )}
+      </Grid>
+
+      {/* Row 1 */}
+      { /*}
+      <Grid item xs={12} md={6} sx={{ width: '45%' }}>
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Top central 8-mers</Typography>
+        <FullWidthChart option={kmerOpt} height={400} deps={[tab, kmerOpt]} />
+      </Grid>
+      */ }
+    </Grid>
+
+    {/* Row 2 */}
+    <Grid container spacing={2} sx={{ mb: 2 }}>
+      <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Length vs Z-DNA Score (limited sample)</Typography>
+        {lenScoreOpt ? (
+          <FullWidthChart option={lenScoreOpt} height={400} deps={[tab, lenScoreOpt]} />
+        ) : (
+          <Box sx={{ p: 2, border: '1px dashed', borderColor: 'divider', color: 'text.secondary', height: 400 }} />
+        )}
+      </Grid>
+      <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Z-DNA Score — per Chromosome (top 15 by median)</Typography>
+        {boxOpt ? (
+          <FullWidthChart option={boxOpt} height={400} deps={[tab, boxOpt]} />
+        ) : (
+          <Box sx={{ p: 2, border: '1px dashed', borderColor: 'divider', color: 'text.secondary', height: 400 }} />
+        )}
+      </Grid>
+    </Grid>
+
+    {/* Row 3 */}
+    <Grid container spacing={2}>
+      <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Density per 100kb {chr ? `— ${chr}` : '(select chromosome)'}</Typography>
+        {densityOpt ? (
+          <FullWidthChart option={densityOpt} height={400} deps={[tab, chr, densityOpt]} />
+        ) : (
+          <Box sx={{ p: 2, border: '1px dashed', borderColor: 'divider', color: 'text.secondary', height: 400 }} />
+        )}
+      </Grid>
+      <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Start vs Z-DNA Score {chr ? `— ${chr}` : '(select chromosome)'}</Typography>
+        {scatterOpt ? (
+          <FullWidthChart option={scatterOpt} height={400} deps={[tab, chr, scatterOpt]} />
+        ) : (
+          <Box sx={{ p: 2, border: '1px dashed', borderColor: 'divider', color: 'text.secondary', height: 400 }} />
+        )}
+      </Grid>
+    </Grid>
+
+  </Box>
+</Paper>
+      )}
     </Box>
   );
 }

@@ -29,7 +29,7 @@ const LABELS: Record<string, string> = {
   order: 'Order',
   family: 'Family',
   genus: 'Genus',
-  tax_name: 'Taxonomies',
+  tax_name: 'Species',
   filename: 'Filename',
 };
 

@@ -6,6 +6,7 @@ import {
 } from '@mui/material';
 import TableViewIcon from '@mui/icons-material/TableView';
 import AnalyticsIcon from '@mui/icons-material/Analytics';
+import HelpIcon from '@mui/icons-material/Help';
 import DnsIcon from '@mui/icons-material/Dns';
 import CodeIcon from '@mui/icons-material/Code';
 import MenuIcon from '@mui/icons-material/Menu';
@@ -17,11 +18,13 @@ import { useColorMode } from '../ThemeModeProvider';
 const drawerWidth = 240;
 
 const items = [
-  { to: '/explore', label: 'Explorer', icon: <TableViewIcon /> },
-  { to: '/metadata', label: 'Metadata', icon: <DnsIcon /> },
-  { to: '/MetadataStats', label: 'Metadata Statistics', icon: <AnalyticsIcon /> },
-  { to: '/data-stats', label: 'Data Statistics', icon: <AnalyticsIcon /> },
+  { to: '/explore', label: 'Sequence search', icon: <TableViewIcon /> },
+  { to: '/metadata', label: 'Species browser', icon: <DnsIcon /> },
+  { to: '/MetadataStats', label: 'Species insights', icon: <AnalyticsIcon /> },
+  { to: '/help', label: 'Help', icon: <HelpIcon /> },
 ];
+
+//{ to: '/data-stats', label: 'Insights', icon: <AnalyticsIcon /> },
 
 export default function AppShell() {
   const [mobileOpen, setMobileOpen] = React.useState(false);
