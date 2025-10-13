@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import {
   Autocomplete,
@@ -468,6 +468,14 @@ export default function MetadataPage() {
   }, [visibleCols, assemblyColKey]);
 
   // ---------------- render ----------------
+  const topScrollRef = useRef<HTMLDivElement>(null);
+  const bottomScrollRef = useRef<HTMLDivElement>(null);
+
+  const syncScroll = (source: HTMLElement, target: HTMLElement | null) => {
+    if (!source || !target) return;
+    target.scrollLeft = source.scrollLeft;
+  };
+
   return (
     <Box sx={{ p: 2 }}>
       <Typography variant="h6" sx={{ mb: 2 }}>Species browser</Typography>
@@ -644,48 +652,103 @@ export default function MetadataPage() {
 
                 
                 {/* RESULTS TABLE */}
-                <TableContainer sx={{ width: '100%', overflowX: 'auto' }}>
-                  <Table size="small" sx={{ width: 'max-content' }}>
-                    <TableHead>
-                      <TableRow>
-                        {reorderedColumns.map((c) => (
-                          <TableCell key={c}>
-                            {c.toLowerCase() === 'tax_name' ? 'Species' : capitalize(c)}
-                          </TableCell>
-                        ))}
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {displayRows.map((row, i) => (
-                        <TableRow key={row.id ?? `${page}-${i}`}>
-                          {reorderedColumns.map((colKey) => {
-                            const val = row[colKey];
-                            if (assemblyColKey && colKey === assemblyColKey) {
-                              const asm = String(val ?? '');
-                              return (
-                                <TableCell key={colKey}>
-                                  {asm ? (
-                                    <Link
-                                      component={RouterLink}
-                                      to={`/explore?assembly=${encodeURIComponent(asm)}`}
-                                      underline="hover"
-                                      sx={{ cursor: 'pointer' }}
-                                    >
-                                      {asm}
-                                    </Link>
-                                  ) : (
-                                    ''
-                                  )}
-                                </TableCell>
-                              );
-                            }
-                            return <TableCell key={colKey}>{String(val ?? '')}</TableCell>;
-                          })}
+                <Box>
+                  {/* Top scrollbar */}
+                  <Box
+                    ref={topScrollRef}
+                    sx={{
+                      overflowX: "auto",
+                      height: 16,
+                      '&::-webkit-scrollbar': {
+                        height: 16,
+                        backgroundColor: '#f5f5f5'
+                      },
+                      '&::-webkit-scrollbar-thumb': {
+                        backgroundColor: '#bdbdbd',
+                        borderRadius: 8,
+                        backgroundClip: 'padding-box',
+                        border: '4px solid transparent',
+                      },
+                      '&::-webkit-scrollbar-track': {
+                        backgroundColor: '#f5f5f5'
+                      }
+                    }}
+                    onScroll={(e) => syncScroll(e.currentTarget, bottomScrollRef.current)}
+                  >
+                    <div style={{ 
+    width: '150%', // Αλλάζουμε το width εδώ
+    height: '1px',
+    visibility: 'hidden'
+  }} />
+                  </Box>
+
+                  {/* Table with bottom scrollbar */}
+                  <TableContainer 
+                    ref={bottomScrollRef}
+                    sx={{
+                      width: '100%',
+                      overflowX: 'auto',
+                      '&::-webkit-scrollbar': {
+                        height: 16,
+                        backgroundColor: '#f5f5f5'
+                      },
+                      '&::-webkit-scrollbar-thumb': {
+                        backgroundColor: '#bdbdbd',
+                        borderRadius: 8,
+                        backgroundClip: 'padding-box',
+                        border: '4px solid transparent',
+                      },
+                      '&::-webkit-scrollbar-track': {
+                        backgroundColor: '#f5f5f5'
+                      }
+                    }}
+                    onScroll={(e) => syncScroll(e.currentTarget, topScrollRef.current)}
+                  >
+                    <Table size="small" sx={{ 
+  width: 'max-content',
+  minWidth: '150%' // Προσθέτουμε αυτό για να εξασφαλίσουμε ότι ο πίνακας είναι αρκετά πλατύς
+}}>
+                      <TableHead>
+                        <TableRow>
+                          {reorderedColumns.map((c) => (
+                            <TableCell key={c}>
+                              {c.toLowerCase() === 'tax_name' ? 'Species' : capitalize(c)}
+                            </TableCell>
+                          ))}
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </TableContainer>
+                      </TableHead>
+                      <TableBody>
+                        {displayRows.map((row, i) => (
+                          <TableRow key={row.id ?? `${page}-${i}`}>
+                            {reorderedColumns.map((colKey) => {
+                              const val = row[colKey];
+                              if (assemblyColKey && colKey === assemblyColKey) {
+                                const asm = String(val ?? '');
+                                return (
+                                  <TableCell key={colKey}>
+                                    {asm ? (
+                                      <Link
+                                        component={RouterLink}
+                                        to={`/explore?assembly=${encodeURIComponent(asm)}`}
+                                        underline="hover"
+                                        sx={{ cursor: 'pointer' }}
+                                      >
+                                        {asm}
+                                      </Link>
+                                    ) : (
+                                      ''
+                                    )}
+                                  </TableCell>
+                                );
+                              }
+                              return <TableCell key={colKey}>{String(val ?? '')}</TableCell>;
+                            })}
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                </Box>
 
 
                 {/* BOTTOM pagination */}

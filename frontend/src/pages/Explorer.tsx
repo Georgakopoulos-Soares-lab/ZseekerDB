@@ -686,6 +686,14 @@ export default function Explorer() {
 
   /* -------------------------------------- UI ------------------------------------- */
 
+  const topScrollRef = useRef<HTMLDivElement>(null);
+  const bottomScrollRef = useRef<HTMLDivElement>(null);
+
+  const syncScroll = (source: HTMLElement, target: HTMLElement | null) => {
+    if (!source || !target) return;
+    target.scrollLeft = source.scrollLeft;
+  };
+
   return (
     <Box sx={{ p: 2 }}>
       <Typography variant="h6" sx={{ mb: 2 }}>Sequence search</Typography>
@@ -847,37 +855,89 @@ export default function Explorer() {
             rowsPerPageOptions={PAGE_SIZE_OPTIONS}
           />
 
-          <TableContainer>
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>Chromosome</TableCell>
-                  <TableCell align="right">Start</TableCell>
-                  <TableCell align="right">End</TableCell>
-                  <TableCell align="right">Z‑DNA Score</TableCell>
-                  <TableCell>Sequence</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {rows.map((r, i) => (
-                  <TableRow key={`${r.Chromosome}-${r.Start}-${i}`}>
-                    <TableCell>{r.Chromosome}</TableCell>
-                    <TableCell align="right">{fmtNum(r.Start)}</TableCell>
-                    <TableCell align="right">{fmtNum(r.End)}</TableCell>
-                    <TableCell align="right">{Number(r.Score).toFixed?.(2) ?? r.Score}</TableCell>
-                    <TableCell sx={{ fontFamily: 'ui-monospace, Consolas, monospace' }}>{r.Sequence}</TableCell>
-                  </TableRow>
-                ))}
-                {!rows.length && (
+          <Box>
+            {/* Top scrollbar */}
+            <Box
+              ref={topScrollRef}
+              sx={{
+                overflowX: "auto",
+                height: 16,
+                '&::-webkit-scrollbar': {
+                  height: 16,
+                  backgroundColor: '#f5f5f5'
+                },
+                '&::-webkit-scrollbar-thumb': {
+                  backgroundColor: '#bdbdbd',
+                  borderRadius: 8,
+                  backgroundClip: 'padding-box',
+                  border: '4px solid transparent',
+                },
+                '&::-webkit-scrollbar-track': {
+                  backgroundColor: '#f5f5f5'
+                }
+              }}
+              onScroll={(e) => syncScroll(e.currentTarget, bottomScrollRef.current)}
+            >
+              <div style={{ 
+                width: "150%",
+                height: "1px",
+                visibility: "hidden"
+              }} />
+            </Box>
+
+            {/* Table with bottom scrollbar */}
+            <TableContainer 
+              ref={bottomScrollRef}
+              sx={{
+                width: "100%",
+                overflowX: "auto",
+                '&::-webkit-scrollbar': {
+                  height: 16,
+                  backgroundColor: '#f5f5f5'
+                },
+                '&::-webkit-scrollbar-thumb': {
+                  backgroundColor: '#bdbdbd',
+                  borderRadius: 8,
+                  backgroundClip: 'padding-box',
+                  border: '4px solid transparent',
+                },
+                '&::-webkit-scrollbar-track': {
+                  backgroundColor: '#f5f5f5'
+                }
+              }}
+              onScroll={(e) => syncScroll(e.currentTarget, topScrollRef.current)}
+            >
+              <Table size="small">
+                <TableHead>
                   <TableRow>
-                    <TableCell colSpan={5} align="center" sx={{ py: 6, color: 'text.secondary' }}>
-                      {hasQueryContext ? 'No rows — refine filters and click APPLY' : 'Select Species or open with ?assembly=...'}
-                    </TableCell>
+                    <TableCell>Chromosome</TableCell>
+                    <TableCell align="right">Start</TableCell>
+                    <TableCell align="right">End</TableCell>
+                    <TableCell align="right">Z‑DNA Score</TableCell>
+                    <TableCell>Sequence</TableCell>
                   </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </TableContainer>
+                </TableHead>
+                <TableBody>
+                  {rows.map((r, i) => (
+                    <TableRow key={`${r.Chromosome}-${r.Start}-${i}`}>
+                      <TableCell>{r.Chromosome}</TableCell>
+                      <TableCell align="right">{fmtNum(r.Start)}</TableCell>
+                      <TableCell align="right">{fmtNum(r.End)}</TableCell>
+                      <TableCell align="right">{Number(r.Score).toFixed?.(2) ?? r.Score}</TableCell>
+                      <TableCell sx={{ fontFamily: 'ui-monospace, Consolas, monospace' }}>{r.Sequence}</TableCell>
+                    </TableRow>
+                  ))}
+                  {!rows.length && (
+                    <TableRow>
+                      <TableCell colSpan={5} align="center" sx={{ py: 6, color: 'text.secondary' }}>
+                        {hasQueryContext ? 'No rows — refine filters and click APPLY' : 'Select Species or open with ?assembly=...'}
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </Box>
 
           <TablePagination
             component="div"
