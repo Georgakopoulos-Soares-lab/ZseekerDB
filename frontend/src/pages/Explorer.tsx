@@ -725,7 +725,7 @@ export default function Explorer() {
         <Paper sx={{ p: 2, mb: 2 }}>
           <Grid container spacing={2} alignItems="center">
             {/* Chromosome */}
-            <Grid item sx={{ width: 200 }}>
+            <Grid item xs={12} md={2} sx={{ marginRight: 2 }}>  {/* Added marginRight */}
               <Autocomplete
                 options={chrOpts}
                 loading={loadingChr}
@@ -736,7 +736,16 @@ export default function Explorer() {
                 getOptionLabel={(o) => o?.label ?? ''}
                 sx={{ minWidth: { xs: '100%', md: 220 } }}
                 renderInput={(params) => (
-                  <TextField {...params} fullWidth label="Chromosome" placeholder="type to search…" />
+                  <TextField
+                    {...params}
+                    fullWidth
+                    label="Chromosome"
+                    sx={{
+                      '& .MuiOutlinedInput-root': {
+                        borderRadius: '8px'
+                      }
+                    }}
+                  />
                 )}
               />
             </Grid>

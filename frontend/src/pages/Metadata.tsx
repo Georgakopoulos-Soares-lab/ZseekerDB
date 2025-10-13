@@ -24,6 +24,7 @@ import {
   TableCell,
   TableBody,
   Link,
+  TableContainer,
 } from '@mui/material';
 import DownloadIcon from '@mui/icons-material/Download';
 import { Link as RouterLink } from 'react-router-dom';
@@ -643,46 +644,48 @@ export default function MetadataPage() {
 
                 
                 {/* RESULTS TABLE */}
-                <Table size="small">
-                  <TableHead>
-                    <TableRow>
-                      {reorderedColumns.map((c) => (
-                        <TableCell key={c}>
-                          {c.toLowerCase() === 'tax_name' ? 'Species' : capitalize(c)}
-                        </TableCell>
-                      ))}
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {displayRows.map((row, i) => (
-                      <TableRow key={row.id ?? `${page}-${i}`}>
-                        {reorderedColumns.map((colKey) => {
-                          const val = row[colKey];
-                          if (assemblyColKey && colKey === assemblyColKey) {
-                            const asm = String(val ?? '');
-                            return (
-                              <TableCell key={colKey}>
-                                {asm ? (
-                                  <Link
-                                    component={RouterLink}
-                                    to={`/explore?assembly=${encodeURIComponent(asm)}`}
-                                    underline="hover"
-                                    sx={{ cursor: 'pointer' }}
-                                  >
-                                    {asm}
-                                  </Link>
-                                ) : (
-                                  ''
-                                )}
-                              </TableCell>
-                            );
-                          }
-                          return <TableCell key={colKey}>{String(val ?? '')}</TableCell>;
-                        })}
+                <TableContainer sx={{ width: '100%', overflowX: 'auto' }}>
+                  <Table size="small" sx={{ width: 'max-content' }}>
+                    <TableHead>
+                      <TableRow>
+                        {reorderedColumns.map((c) => (
+                          <TableCell key={c}>
+                            {c.toLowerCase() === 'tax_name' ? 'Species' : capitalize(c)}
+                          </TableCell>
+                        ))}
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHead>
+                    <TableBody>
+                      {displayRows.map((row, i) => (
+                        <TableRow key={row.id ?? `${page}-${i}`}>
+                          {reorderedColumns.map((colKey) => {
+                            const val = row[colKey];
+                            if (assemblyColKey && colKey === assemblyColKey) {
+                              const asm = String(val ?? '');
+                              return (
+                                <TableCell key={colKey}>
+                                  {asm ? (
+                                    <Link
+                                      component={RouterLink}
+                                      to={`/explore?assembly=${encodeURIComponent(asm)}`}
+                                      underline="hover"
+                                      sx={{ cursor: 'pointer' }}
+                                    >
+                                      {asm}
+                                    </Link>
+                                  ) : (
+                                    ''
+                                  )}
+                                </TableCell>
+                              );
+                            }
+                            return <TableCell key={colKey}>{String(val ?? '')}</TableCell>;
+                          })}
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
 
 
                 {/* BOTTOM pagination */}
