@@ -6,9 +6,11 @@ import {
 } from '@mui/material';
 import TableViewIcon from '@mui/icons-material/TableView';
 import AnalyticsIcon from '@mui/icons-material/Analytics';
+import SearchIcon from '@mui/icons-material/Search';
+import PrivacyIcon from '@mui/icons-material/Lock';
 import HelpIcon from '@mui/icons-material/Help';
+import AboutIcon from '@mui/icons-material/Info';
 import DnsIcon from '@mui/icons-material/Dns';
-import CodeIcon from '@mui/icons-material/Code';
 import MenuIcon from '@mui/icons-material/Menu';
 import DarkModeIcon from '@mui/icons-material/DarkMode';
 import LightModeIcon from '@mui/icons-material/LightMode';
@@ -21,7 +23,10 @@ const items = [
   { to: '/explore', label: 'Sequence search', icon: <TableViewIcon /> },
   { to: '/metadata', label: 'Species browser', icon: <DnsIcon /> },
   { to: '/MetadataStats', label: 'Species insights', icon: <AnalyticsIcon /> },
+  { to: '/additional-tools', label: 'Additional tools', icon: <SearchIcon /> },
   { to: '/help', label: 'Help', icon: <HelpIcon /> },
+  { to: '/about', label: 'About', icon: <AboutIcon /> },
+  { to: '/privacy', label: 'Privacy', icon: <PrivacyIcon /> },
 ];
 
 //{ to: '/data-stats', label: 'Insights', icon: <AnalyticsIcon /> },

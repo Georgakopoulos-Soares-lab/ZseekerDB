@@ -3,7 +3,7 @@ import * as React from 'react';
 import { Box } from '@mui/material';
 import {
   DataGrid,
-  GridColDef,
+  type GridColDef,
   GridToolbarQuickFilter,
   GridToolbarContainer,
 } from '@mui/x-data-grid';
@@ -15,33 +15,48 @@ type Props = {
   height?: number;
 };
 
-// Χάρτης "κλειδί -> label" για τα headers
-const LABELS: Record<string, string> = {
-  assembly: 'Assembly',
-  taxid: 'Taxid',
-  genome_size: 'Genome Size',
-  genome_size_ungapped: 'Genome Size (Ungapped)',
-  gc_percent: 'GC Percent',
-  superkingdom: 'Superkingdom',
-  kingdom: 'Kingdom',
-  phylum: 'Phylum',
-  class: 'Class',
-  order: 'Order',
-  family: 'Family',
-  genus: 'Genus',
-  tax_name: 'Species',
-  filename: 'Filename',
+// Column configuration type
+export type MetadataColumn = {
+  dbName: string;
+  label: string;
+  hidden: boolean;
 };
 
-// helper: από "genome_size_ungapped" -> "Genome Size Ungapped"
-function toTitle(key: string) {
-  return key
-    .split('_')
-    .map((s) => (s ? s[0].toUpperCase() + s.slice(1) : ''))
-    .join(' ');
-}
+// Column definitions in display order
+export const METADATA_COLUMNS: MetadataColumn[] = [
+  { dbName: "assembly", label: "Assembly", hidden: false },
+  { dbName: "bioproject", label: "Bioproject", hidden: true },
+  { dbName: "biosample", label: "Biosample", hidden: true },
+  { dbName: "taxid", label: "Taxon ID", hidden: false },
+  { dbName: "assembly_level", label: "Assembly level", hidden: true },
+  { dbName: "genome_size", label: "Genome size", hidden: false },
+  { dbName: "gc_percent", label: "GC content (%)", hidden: false },
+  { dbName: "superkingdom", label: "Superkingdom", hidden: false },
+  { dbName: "kingdom", label: "Kingdom", hidden: false },
+  { dbName: "phylum", label: "Phylum", hidden: false },
+  { dbName: "class", label: "Class", hidden: false },
+  { dbName: "order", label: "Order", hidden: false },
+  { dbName: "family", label: "Family", hidden: false },
+  { dbName: "genus", label: "Genus", hidden: false },
+  { dbName: "tax_name", label: "Specie", hidden: false },
+  { dbName: "is_t2t", label: "T2T", hidden: false },
+  { dbName: "viral_realm", label: "Viral realm", hidden: false },
+  { dbName: "updated_tax_name", label: "Infraspecific name", hidden: false },
+  { dbName: "obs_zbp", label: "Z-DNA bps", hidden: false },
+  { dbName: "obs_density_per_kb", label: "Z-DNA density (per kb)", hidden: false },
+  { dbName: "obs_n_zdna", label: "Number of predictions", hidden: false },
+];
 
-// Toolbar με ένα γρήγορο filter (προαιρετικό)
+// Create a map for quick label lookups
+const LABELS: Record<string, string> = Object.fromEntries(
+  METADATA_COLUMNS.map(col => [col.dbName, col.label])
+);
+
+// Create a map for default visibility
+const DEFAULT_VISIBILITY: Record<string, boolean> = Object.fromEntries(
+  METADATA_COLUMNS.map(col => [col.dbName, !col.hidden])
+);
+
 function QuickToolbar() {
   return (
     <GridToolbarContainer>
@@ -51,24 +66,43 @@ function QuickToolbar() {
 }
 
 export default function DataTable({ rows, columns, visible, height = 480 }: Props) {
-  // Αν δεν μας ήρθε explicit "visible" για ένα πεδίο, το θεωρούμε ορατό
-  const isVisible = (field: string) =>
-    Object.prototype.hasOwnProperty.call(visible, field) ? !!visible[field] : true;
+  // Combine default visibility with provided visibility
+  const isVisible = React.useCallback((field: string) => {
+    // First check if there's an explicit visibility setting
+    if (Object.prototype.hasOwnProperty.call(visible, field)) {
+      return !!visible[field];
+    }
+    
+    // Otherwise use the default from METADATA_COLUMNS
+    const column = METADATA_COLUMNS.find(col => col.dbName === field);
+    if (column) {
+      return !column.hidden;
+    }
+    
+    // If field not in METADATA_COLUMNS, show by default
+    return true;
+  }, [visible]);
 
   const gridColumns: GridColDef[] = React.useMemo(() => {
-    return columns.map((field) => {
-      const headerName = LABELS[field] ?? toTitle(field);
-      return {
+    // Sort columns to match METADATA_COLUMNS order
+    const columnOrder = new Map(METADATA_COLUMNS.map((col, i) => [col.dbName, i]));
+    
+    return columns
+      .sort((a, b) => {
+        const orderA = columnOrder.get(a) ?? Number.MAX_SAFE_INTEGER;
+        const orderB = columnOrder.get(b) ?? Number.MAX_SAFE_INTEGER;
+        return orderA - orderB;
+      })
+      .map((field) => ({
         field,
-        headerName,
+        headerName: LABELS[field] ?? field,
         flex: 1,
-        hide: !isVisible(field),
+        hide: !isVisible(field), // This will now use the hidden property
         sortable: true,
         minWidth: 140,
         valueGetter: (params) => params.row?.[field],
-      } as GridColDef;
-    });
-  }, [columns, visible]);
+      }));
+  }, [columns, isVisible]);
 
   return (
     <Box sx={{ width: '100%', height }}>

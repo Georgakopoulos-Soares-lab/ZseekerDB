@@ -185,21 +185,18 @@ func (s *Server) metadataList(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "25"))
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 	reqSort := strings.TrimSpace(c.DefaultQuery("sort", ""))
+	strings.TrimSpace(c.DefaultQuery("sort", ""))
 	dir := strings.ToUpper(strings.TrimSpace(c.Query("dir")))
 	if dir != "ASC" && dir != "DESC" {
 		dir = "ASC"
 	}
 
-	cols, err := getColumnsLimit0(s.db, "metadata")
-	if err != nil {
-		log.Println("metadataList columns error:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	if len(cols) == 0 {
-		c.JSON(http.StatusOK, gin.H{"columns": []string{}, "rows": []any{}, "limit": limit, "offset": offset, "total": 0})
-		return
-	}
+	// Use configured columns instead of querying them
+	cols := getMetadataColumns()
+
+	// Build SELECT with proper aliases
+	selectList := buildMetadataSelect()
+
 	sortCol := cols[0]
 	if reqSort != "" {
 		for _, cName := range cols {
@@ -276,7 +273,7 @@ func (s *Server) metadataList(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	q := "SELECT * FROM metadata" + where + orderBy + " LIMIT ? OFFSET ?"
+	q := "SELECT " + selectList + " FROM metadata " + where + orderBy + " LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -295,7 +292,14 @@ func (s *Server) metadataList(c *gin.Context) {
 	if len(respCols) == 0 {
 		respCols = cols
 	}
-	c.JSON(http.StatusOK, gin.H{"columns": respCols, "rows": data, "limit": limit, "offset": offset, "total": total})
+	// When sending response, use the ordered labels
+	c.JSON(http.StatusOK, gin.H{
+		"columns": cols,
+		"rows":    data,
+		"limit":   limit,
+		"offset":  offset,
+		"total":   total,
+	})
 }
 
 func (s *Server) metadataExport(c *gin.Context) {
@@ -344,7 +348,8 @@ func (s *Server) metadataExport(c *gin.Context) {
 			lim = n
 		}
 	}
-	q := "SELECT * FROM metadata" + where + orderBy
+	selectList := buildMetadataSelect()
+	q := "SELECT " + selectList + " FROM metadata" + where + orderBy
 	if lim > 0 {
 		q += fmt.Sprintf(" LIMIT %d", lim)
 	}
@@ -361,7 +366,7 @@ func (s *Server) metadataExport(c *gin.Context) {
 	c.Header("Content-Disposition", "attachment; filename=metadata_export.csv")
 
 	w := csv.NewWriter(c.Writer)
-	_ = w.Write(cols)
+	_ = w.Write(getMetadataColumns())
 	vals := make([]any, len(cols))
 	ptrs := make([]any, len(cols))
 	for i := range vals {
@@ -872,6 +877,62 @@ func runSQL(s *Server, c *gin.Context, stmt string) {
 	c.JSON(http.StatusOK, gin.H{"data": data})
 }
 
+// Metadata column configuration
+type metadataColumn struct {
+	DbName string // Database column name
+	Label  string // Frontend display name
+	Hidden bool   // Hidden by default in UI
+}
+
+// Column definitions in display order
+var metadataColumns = []metadataColumn{
+	{DbName: "assembly", Label: "Assembly", Hidden: false},
+	{DbName: "bioproject", Label: "Bioproject", Hidden: true},
+	{DbName: "biosample", Label: "Biosample", Hidden: true},
+	{DbName: "taxid", Label: "Taxon ID", Hidden: false},
+	{DbName: "assembly_level", Label: "Assembly level", Hidden: true},
+	{DbName: "genome_size", Label: "Genome size", Hidden: false},
+	{DbName: "gc_percent", Label: "GC content (%)", Hidden: false},
+	{DbName: "superkingdom", Label: "Superkingdom", Hidden: false},
+	{DbName: "kingdom", Label: "Kingdom", Hidden: false},
+	{DbName: "phylum", Label: "Phylum", Hidden: false},
+	{DbName: "class", Label: "Class", Hidden: false},
+	{DbName: "order", Label: "Order", Hidden: false},
+	{DbName: "family", Label: "Family", Hidden: false},
+	{DbName: "genus", Label: "Genus", Hidden: false},
+	{DbName: "tax_name", Label: "Specie", Hidden: false},
+	{DbName: "is_t2t", Label: "T2T", Hidden: false},
+	{DbName: "viral_realm", Label: "Viral realm", Hidden: false},
+	{DbName: "updated_tax_name", Label: "Infraspecific name", Hidden: false},
+	{DbName: "obs_zbp", Label: "Z-DNA bps", Hidden: false},
+	{DbName: "obs_density_per_kb", Label: "Z-DNA density (per kb)", Hidden: false},
+	{DbName: "obs_n_zdna", Label: "Number of predictions", Hidden: false},
+}
+
+// Helper to build SELECT clause with proper column aliases
+func buildMetadataSelect() string {
+	parts := make([]string, len(metadataColumns))
+	for i, col := range metadataColumns {
+		if col.Label == col.DbName {
+			parts[i] = quoteIdent(col.DbName)
+		} else {
+			parts[i] = fmt.Sprintf("%s AS %s",
+				quoteIdent(col.DbName),
+				quoteIdent(col.Label))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// Helper to get ordered column labels
+func getMetadataColumns() []string {
+	cols := make([]string, len(metadataColumns))
+	for i, col := range metadataColumns {
+		cols[i] = col.Label
+	}
+	return cols
+}
+
 // ---------- CORS & main ----------
 func corsMiddleware(allowed []string) gin.HandlerFunc {
 	allowAll := false
@@ -944,14 +1005,18 @@ func main() {
 
 	// quick previews
 	r.GET("/api/metadata/preview", func(c *gin.Context) {
-		rows, err := s.db.Query(`SELECT * FROM metadata LIMIT 100`)
+		selectList := buildMetadataSelect()
+		rows, err := s.db.Query("SELECT " + selectList + " FROM metadata LIMIT 100")
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		defer rows.Close()
 		data, _ := rowsToMaps(rows)
-		c.JSON(http.StatusOK, gin.H{"data": data})
+		c.JSON(http.StatusOK, gin.H{
+			"columns": getMetadataColumns(),
+			"data":    data,
+		})
 	})
 	r.GET("/api/zdna/preview", func(c *gin.Context) {
 		rows, err := s.db.Query(`SELECT "Chromosome","Start","End","Z-DNA Score","Sequence" FROM data LIMIT 100`)

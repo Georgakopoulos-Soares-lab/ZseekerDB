@@ -54,7 +54,7 @@ export default function Brand() {
 
       {/* Λογότυπο κειμένου */}
       <Typography variant="h6" fontWeight={800} sx={{ lineHeight: 1 }}>
-        Zdna
+        ZSeeker
         <Typography
           component="span"
           variant="h6"

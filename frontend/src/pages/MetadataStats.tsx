@@ -12,6 +12,46 @@ import ReactECharts from 'echarts-for-react';
    helpers
    ========================================================================== */
 
+   // ---- color helpers ----
+function hslToHex(h: number, s: number, l: number) {
+  s = Math.max(0, Math.min(1, s));
+  l = Math.max(0, Math.min(1, l));
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0, g = 0, b = 0;
+  if (0 <= h && h < 60) [r, g, b] = [c, x, 0];
+  else if (60 <= h && h < 120) [r, g, b] = [x, c, 0];
+  else if (120 <= h && h < 180) [r, g, b] = [0, c, x];
+  else if (180 <= h && h < 240) [r, g, b] = [0, x, c];
+  else if (240 <= h && h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const toHex = (v: number) => Math.round((v + m) * 255).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+/**
+ * Δίνει διαφορετικό χρώμα σε ΚΑΘΕ node.
+ * - Χρησιμοποιεί golden-angle spread για ξεχωριστές αποχρώσεις στα αδέρφια.
+ * - Κλιμακώνει lightness ανά βάθος για διακριτότητα στα levels.
+ */
+function colorizeTree(nodes: TreeNode[], depth = 0, hueOffset = 0) {
+  if (!nodes) return;
+  const GOLDEN = 137.508; // golden angle σε μοίρες
+  const lightness = [0.55, 0.50, 0.45, 0.40, 0.35][Math.min(depth, 4)];
+  const saturation = 0.62;
+
+  nodes.forEach((n, i) => {
+    const h = (hueOffset + i * GOLDEN) % 360;
+    n.itemStyle = n.itemStyle || {};
+    n.itemStyle.color = hslToHex(h, saturation, lightness);
+    if (n.children && n.children.length) {
+      // διαφορετικό offset ανά κλάδο για να μη “συμπέσουν” αποχρώσεις σε άλλα levels
+      colorizeTree(n.children, depth + 1, (h + 23) % 360);
+    }
+  });
+}
+
 async function fetchSql<T = any>(sql: string): Promise<T[]> {
   const normalized = sql.replace(/\s+/g, ' ').trim();
   const url = `/api/sql?query=${encodeURIComponent(normalized)}`;
@@ -289,7 +329,11 @@ export default function MetadataStats() {
           .map(toNode)
           .filter((n): n is TreeNode => !!n);
 
+        // Δώσε μοναδικά χρώματα σε ΟΛΑ τα nodes (όλα τα levels)
+        colorizeTree(data);
+
         setTreeData(data);
+
       } catch (e: any) {
         setError(e?.message || 'Failed to load stats');
       } finally {
@@ -303,65 +347,29 @@ export default function MetadataStats() {
   const hasData = useMemo(() => !loading && !error, [loading, error]);
 
   // ------------------------------ ECharts Treemap ------------------------------
-  const treemapOption = useMemo(() => {
-    return {
-      // κανένα “άσπρο” background
-      backgroundColor: 'transparent',
-      // 👉 Παλέτα 100% μπλε για όλα τα επίπεδα
-      color: BLUE_PALETTE,
-      tooltip: {
-        formatter: (info: any) => {
-          const path = (info?.treePathInfo || [])
-            .slice(1)
-            .map((p: any) => p.name)
-            .join(' › ');
-          const v = info?.value;
-          return `<b>${path || info.name}</b><br/>Count: ${Number(v).toLocaleString()}`;
-        }
-      },
-      series: [{
-        type: 'treemap',
-        data: treeData,
-        // ένα επίπεδο τη φορά: SK → Kingdom → Phylum → tax_name
-        leafDepth: 1,
-        nodeClick: 'zoomToNode',
-        roam: false,
-        squareRatio: 1,
-        colorMappingBy: 'index',
-        breadcrumb: {
-          show: true,
-          height: 28,
-          top: 'bottom', // Changed from bottom to top
-          left: 'center',
-          emptyItemWidth: 25,
-          itemStyle: {
-            color: '#333',
-            borderColor: '#ccc',
-            borderWidth: 1,
-            borderRadius: 2,
-            textStyle: {
-              color: '#d5d5d5ff'
-            }
-          },
-          emphasis: {
-            itemStyle: {
-              color: '#f5f5f5'
-            }
-          }
-        },
-        // Καμία “λευκή κορνίζα” γύρω από το treemap
-        itemStyle: { borderColor: 'transparent', borderWidth: 0.5 },
-        label: { show: true, formatter: '{b}', overflow: 'truncate', color: '#fff' },
-        upperLabel: { show: true, height: 22, color: '#fff' },
-        levels: [
-          { itemStyle: { borderWidth: 0, gapWidth: 4, borderColor: 'transparent' }, upperLabel: { show: true } }, // superkingdom
-          { itemStyle: { borderWidth: 0.5, gapWidth: 3, borderColor: 'transparent' } },               // kingdom
-          { itemStyle: { borderWidth: 0.5, gapWidth: 2, borderColor: 'transparent' } },               // phylum
-          { itemStyle: { borderWidth: 0.5, gapWidth: 1, borderColor: 'transparent' } },               // tax_name
-        ]
-      }]
-    };
-  }, [treeData]);
+const treemapOption = useMemo(() => ({
+  backgroundColor: 'transparent',
+  tooltip: { /* ... */ },
+  series: [{
+    type: 'treemap',
+    data: treeData,
+    leafDepth: 1,
+    nodeClick: 'zoomToNode',
+    roam: false,
+    squareRatio: 1,
+    // ❌ Μην βάζεις color / colorMappingBy εδώ
+    breadcrumb: { /* ... */ },
+    itemStyle: { borderColor: 'transparent', borderWidth: 0.5 },
+    label: { show: true, formatter: '{b}', overflow: 'truncate', color: '#fff' },
+    upperLabel: { show: true, height: 22, color: '#fff' },
+    levels: [
+      { itemStyle: { borderWidth: 0,   gapWidth: 4, borderColor: 'transparent' } },
+      { itemStyle: { borderWidth: 0.5, gapWidth: 3, borderColor: 'transparent' } },
+      { itemStyle: { borderWidth: 0.5, gapWidth: 2, borderColor: 'transparent' } },
+      { itemStyle: { borderWidth: 0.5, gapWidth: 1, borderColor: 'transparent' } },
+    ]
+  }]
+}), [treeData]);
 
   /* -------------------------------------- UI ------------------------------------- */
 
@@ -457,7 +465,13 @@ export default function MetadataStats() {
                 bgcolor: 'transparent',
               }}
             >
-              <ReactECharts style={{ width: '100%', height: '100%' }} option={treemapOption} />
+              <ReactECharts
+                style={{ width: '100%', height: '100%' }}
+                option={treemapOption}
+                notMerge={true}                // <-- σημαντικό
+                replaceMerge={['series']}      // <-- προαιρετικά, βοηθάει
+              />
+
             </Box>
           </Box>
 
@@ -478,7 +492,7 @@ export default function MetadataStats() {
     }}
   >
     <Typography variant="h6" sx={{ mb: 2, fontWeight: 500 }}>
-      Superkingdoms (count)
+      Species in each superkingdom (count)
     </Typography>
     {superkingdoms.map((item) => (
       <Box 

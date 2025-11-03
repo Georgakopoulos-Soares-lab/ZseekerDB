@@ -6,7 +6,11 @@ import Metadata from './pages/Metadata'
 import MetadataStats from './pages/MetadataStats'
 import DataStats from './pages/DataStats'
 import HelpDocs from './pages/HelpDocs'
+import Privacy from './pages/Privacy'
+import About from './pages/About'
+
 import HomeInsights from './pages/HomeInsights'   // <-- new import
+import AdditionalTools from './pages/AdditionalTools'
 
 function Home() {
   return (
@@ -65,7 +69,10 @@ export default function App() {
         <Route path="/metadata" element={<Metadata />} />
         <Route path="/metadatastats" element={<MetadataStats />} />
         <Route path="/data-stats" element={<DataStats />} />
+        <Route path="/additional-tools" element={<AdditionalTools />} />
         <Route path="/help" element={<HelpDocs />} />
+        <Route path="/about" element={<About />} />
+        <Route path="/privacy" element={<Privacy />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

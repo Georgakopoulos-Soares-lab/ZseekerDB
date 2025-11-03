@@ -32,6 +32,7 @@ import { Link as RouterLink } from 'react-router-dom';
 import RangeFilter from '../components/RangeFilter';
 import { ColumnVisibilityMenu } from '../components/ColumnVisibilityMenu';
 import BasicTaxonomy from '../components/BasicTaxonomy';
+import { METADATA_COLUMNS } from '../components/DataTable';
 
 // ---------------- helpers ----------------
 
@@ -52,7 +53,7 @@ type Ranges = {
   gc_percent_max: number | '';
 };
 
-// Utility: case‑insensitive column finder (pass the *lowercase* name)
+// Case-insensitive finder on an array of column strings
 const findCol = (cols: string[], nameLower: string) =>
   cols.find((c) => c.toLowerCase() === nameLower) ?? null;
 
@@ -84,6 +85,85 @@ function makeBubbleSizer(sizes: number[]) {
     const t = smax > smin ? (sx - smin) / (smax - smin) : 0;
     return 6 + t * 18; // 6–24 px
   };
+}
+
+/* CHART COLORS----------- palettes (distinct per chart) ---------------- */
+const CHART_PALETTES = {
+  genusBar: ['#4C78A8', '#9ECAE9', '#A0CBE8', '#6B6ECF'],      // μπλε αποχρώσεις
+  scatter:  ['#F58518', '#54A24B', '#E45756', '#72B7B2', '#B279A2', '#FF9DA6'], // ζεστές+ψυχρές
+  histGenome: ['#72B7B2', '#59A14F'],                           // teal/green
+  histGC:     ['#E45756', '#F28E2B'],                           // κόκκινο/πορτοκαλί
+} as const;
+
+
+/** ---------------- Column resolve layer (dbName OR label) ---------------- **/
+/** Reverse map: dbName -> label (from METADATA_COLUMNS) */
+const DB_TO_LABEL: Record<string, string> = METADATA_COLUMNS.reduce((acc, c) => {
+  acc[c.dbName.toLowerCase()] = c.label;
+  return acc;
+}, {} as Record<string, string>);
+
+/** Extra aliases, incl. legacy names and display labels that may appear from API */
+const COL_ALIASES: Record<string, string[]> = {
+  // density (new db name + legacy + label)
+  obs_density_per_kb: ['zdna_density', 'Z-DNA density (per kb)'],
+  // others that charts use
+  gc_percent: ['GC content (%)'],
+  genome_size: ['Genome size'],
+  genus: ['Genus'],
+  superkingdom: ['Superkingdom'],
+  tax_name: ['Specie', 'Species'],
+  assembly: ['Assembly'],
+};
+
+/** Find the column actually present in `cols` given a desired dbName. */
+function findColSmart(cols: string[], desiredDbName: string): string | null {
+  const colsLower = cols.map(c => c.toLowerCase());
+  const tryMatch = (candidate: string) => {
+    const i = colsLower.indexOf(candidate.toLowerCase());
+    return i >= 0 ? cols[i] : null;
+  };
+
+  // 1) exact dbName
+  const byDb = tryMatch(desiredDbName);
+  if (byDb) return byDb;
+
+  // 2) by label from METADATA_COLUMNS
+  const lbl = DB_TO_LABEL[desiredDbName.toLowerCase()];
+  if (lbl) {
+    const byLabel = tryMatch(lbl);
+    if (byLabel) return byLabel;
+  }
+
+  // 3) by aliases (legacy db names or display labels)
+  const aliases = COL_ALIASES[desiredDbName] ?? [];
+  for (const a of aliases) {
+    const hit = tryMatch(a);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** Find first present among multiple desired dbNames (e.g., new & legacy). */
+function findFirstSmart(cols: string[], desiredDbNames: string[]): string | null {
+  for (const d of desiredDbNames) {
+    const hit = findColSmart(cols, d);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// ---- dynamic bottom padding helper (for long/rotated labels)
+function estimateBottomPadding(
+  labels: string[],
+  {
+    min = 90,
+    perChar = 3.5,
+    max = 220,
+  } = {}
+) {
+  const longest = labels.reduce((m, s) => Math.max(m, (s?.length ?? 0)), 0);
+  return Math.min(max, Math.round(min + longest * perChar));
 }
 
 // ---------------- page ----------------
@@ -128,7 +208,12 @@ export default function MetadataPage() {
   // Table + pagination
   const [rows, setRows] = useState<any[]>([]);
   const [cols, setCols] = useState<string[]>([]);
-  const [columnsVisible, setColumnsVisible] = useState<Record<string, boolean>>({});
+  const [columnsVisible, setColumnsVisible] = useState<Record<string, boolean>>(() => {
+    // Use labels from METADATA_COLUMNS as starting visibility map
+    const v: Record<string, boolean> = {};
+    METADATA_COLUMNS.forEach(col => { v[col.label] = !col.hidden; });
+    return v;
+  });
   const [loading, setLoading] = useState(false);
   const [total, setTotal] = useState(0);
   const [limit, setLimit] = useState(25);
@@ -156,12 +241,18 @@ export default function MetadataPage() {
     setOffset(0);
   }, [superkingdom]);
 
-  // --- formatting μόνο για εμφάνιση: zdna_density με 2 δεκαδικά ---
-  const densityColKey = useMemo(() => findCol(cols, 'zdna_density'), [cols]);
+  // --- formatting μόνο για εμφάνιση: Z-DNA density με 2 δεκαδικά (new+old+label) ---
+  const densityColKey = useMemo(
+    () => findFirstSmart(cols, ['obs_density_per_kb', 'zdna_density']),
+    [cols]
+  );
 
-  const assemblyColKey = useMemo(() => findCol(cols, 'assembly'), [cols]);
+  const assemblyColKey = useMemo(
+    () => findColSmart(cols, 'assembly'),
+    [cols]
+  );
+
   const visibleCols = useMemo(() => cols.filter(c => columnsVisible[c] !== false), [cols, columnsVisible]);
-
 
   const displayRows = useMemo(() => {
     if (!densityColKey) return rows;
@@ -217,17 +308,8 @@ export default function MetadataPage() {
         const r = await fetch(`/api/metadata/list?${paramsResults}`);
         const j = await r.json();
         setRows(j.rows ?? []);
-        setCols(j.columns ?? []);
+        setCols(j.columns ?? []); // may now be labels or dbNames
         setTotal(Number(j.total ?? 0));
-
-        // init column visibility on first load
-        if (Object.keys(columnsVisible).length === 0 && Array.isArray(j.columns)) {
-          const v: Record<string, boolean> = {};
-          j.columns.forEach((c: string) => {
-            v[c] = !['bioproject', 'biosample', 'assembly_level', 'filename'].includes(c);
-          });
-          setColumnsVisible(v);
-        }
       } catch (e) {
         console.error('[metadata] fetch failed', e);
         setRows([]); setCols([]); setTotal(0);
@@ -249,7 +331,7 @@ export default function MetadataPage() {
         const j = await r.json();
         if (!cancelled) {
           setVizRows(j.rows ?? []);
-          setVizCols(j.columns ?? []);
+          setVizCols(j.columns ?? []); // may now be labels or dbNames
         }
       } catch {
         if (!cancelled) { setVizRows([]); setVizCols([]); }
@@ -316,15 +398,20 @@ export default function MetadataPage() {
 
   // ------------- VISUALIZATIONS (derive from vizRows + vizCols) -------------
 
-  const colGenus = useMemo(() => findCol(vizCols, 'genus'), [vizCols]);
-  const colGC = useMemo(() => findCol(vizCols, 'gc_percent'), [vizCols]);
-  const colGSize = useMemo(() => findCol(vizCols, 'genome_size'), [vizCols]);
-  const colSK = useMemo(() => findCol(vizCols, 'superkingdom'), [vizCols]);
-  const colTaxName = useMemo(() => findCol(vizCols, 'tax_name'), [vizCols]);
-  const colAssembly = useMemo(() => findCol(vizCols, 'assembly'), [vizCols]);
-  const vizDensityCol = useMemo(() => findCol(vizCols, 'zdna_density'), [vizCols]);
+  const colGenus = useMemo(() => findColSmart(vizCols, 'genus'), [vizCols]);
+  const colGC = useMemo(() => findColSmart(vizCols, 'gc_percent'), [vizCols]);
+  const colGSize = useMemo(() => findColSmart(vizCols, 'genome_size'), [vizCols]);
+  const colSK = useMemo(() => findColSmart(vizCols, 'superkingdom'), [vizCols]);
+  const colTaxName = useMemo(() => findColSmart(vizCols, 'tax_name'), [vizCols]);
+  const colAssembly = useMemo(() => findColSmart(vizCols, 'assembly'), [vizCols]);
 
-  // 1) Top Genera by avg ZDNA density (bar)
+  // density column (support new+old db names and label)
+  const vizDensityCol = useMemo(
+    () => findFirstSmart(vizCols, ['obs_density_per_kb', 'zdna_density']),
+    [vizCols]
+  );
+
+  // 1) Top Genera by avg Z-DNA density (bar)
   const genusBar = useMemo(() => {
     if (!vizDensityCol || !colGenus) return { cats: [] as string[], vals: [] as number[] };
     const agg = new Map<string, { sum: number; n: number }>();
@@ -343,15 +430,33 @@ export default function MetadataPage() {
   }, [vizRows, vizDensityCol, colGenus]);
 
   const genusBarOption = useMemo(() => ({
-    title: { text: 'Top Genera by avg ZDNA density', left: 'center' },
+    title: { text: 'Top Genera by avg Z-DNA density (/kb)', left: 'center' },
     tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: genusBar.cats, axisLabel: { rotate: 35 } },
-    yAxis: { type: 'value', name: 'avg density' },
-    series: [{ type: 'bar', data: genusBar.vals }],
-    grid: { left: 60, right: 20, top: 50, bottom: 80 }
+    xAxis: {
+      type: 'category',
+      data: genusBar.cats,
+      axisLabel: { rotate: 35, margin: 16 },
+      name: 'Genus',
+      nameLocation: 'middle',
+      nameGap: 80,
+    },
+    yAxis: {
+      type: 'value',
+      name: 'avg density (/kb)',
+      nameLocation: 'middle',
+      nameGap: 45,
+      axisLabel: { margin: 12 },
+    },
+    series: [{
+    type: 'bar',
+    data: genusBar.vals,
+    // προαιρετικά “κλειδώνουμε” την πρώτη απόχρωση για ομοιομορφία
+    itemStyle: { color: CHART_PALETTES.genusBar[0] }
+    }],
+    grid: { left: 60, right: 20, top: 50, bottom: 90 }
   }), [genusBar]);
 
-  // 2) Scatter: GC% vs ZDNA density, bubble ~ genome_size, color = superkingdom
+  // 2) Scatter: GC% vs Z-DNA density, bubble ~ genome_size, color = superkingdom
   const scatterData = useMemo(() => {
     if (!vizDensityCol || !colGC) return [];
     const pts: { gc: number; den: number; size: number; sk: string; label: string }[] = [];
@@ -396,76 +501,129 @@ export default function MetadataPage() {
   }, [scatterData, skCats, bubbleSizer]);
 
   const scatterOption = useMemo(() => ({
-    title: { text: 'GC% vs ZDNA density', left: 'center' },
+    color: CHART_PALETTES.scatter,
+    title: { text: 'GC% vs Z-DNA density (/kb)', left: 'center' },
     tooltip: {
       trigger: 'item',
       formatter: (p: any) => {
         const [gc, den, sz] = p.value || [];
-        return `${p.seriesName}<br/>GC%: ${gc?.toFixed?.(2)}<br/>Density: ${den?.toFixed?.(2)}${Number.isFinite(sz) ? `<br/>Genome size: ${Math.round(sz)}` : ''}`;
+        return `${p.seriesName}<br/>GC%: ${gc?.toFixed?.(2)}<br/>Z-DNA density (/kb): ${den?.toFixed?.(2)}${Number.isFinite(sz) ? `<br/>Genome size: ${Math.round(sz)}` : ''}`;
       }
     },
     legend: { top: 28 },
-    xAxis: { type: 'value', name: 'GC %' },
-    yAxis: { type: 'value', name: 'ZDNA density' },
+    xAxis: {
+      type: 'value',
+      name: 'GC %',
+      nameLocation: 'middle',
+      nameGap: 45,
+      axisLabel: { margin: 12 },
+    },
+    yAxis: {
+      type: 'value',
+      name: 'Z-DNA density (/kb)',
+      nameLocation: 'middle',
+      nameGap: 45,
+      axisLabel: { margin: 12 },
+    },
     series: scatterSeries,
-    grid: { left: 60, right: 20, top: 70, bottom: 50 }
+    grid: { left: 70, right: 20, top: 70, bottom: 60 }
   }), [scatterSeries]);
 
   // 3) Genome size histogram
-  const colGSizeLbl = useMemo(() => findCol(vizCols, 'genome_size'), [vizCols]);
+  const colGSizeLbl = useMemo(() => findColSmart(vizCols, 'genome_size'), [vizCols]);
   const histGenome = useMemo(() => {
     if (!colGSizeLbl) return { labels: [], counts: [] };
     return buildHistogram(vizRows.map(r => Number(r[colGSizeLbl])));
   }, [vizRows, colGSizeLbl]);
 
-  const histGenomeOption = useMemo(() => ({
-    title: { text: 'Genome Size distribution', left: 'center' },
-    tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: histGenome.labels, axisLabel: { rotate: 45 } },
-    yAxis: { type: 'value', name: 'Count' },
-    series: [{ type: 'bar', data: histGenome.counts }],
-    grid: { left: 60, right: 20, top: 50, bottom: 80 }
-  }), [histGenome]);
+  const histGenomeOption = useMemo(() => {
+    const bottomPad = estimateBottomPadding(histGenome.labels);
+    return {
+      color: CHART_PALETTES.histGenome,
+      title: { text: 'Genome Size distribution', left: 'center' },
+      tooltip: { trigger: 'axis' },
+      xAxis: {
+        type: 'category',
+        data: histGenome.labels,
+        axisLabel: {
+          interval: 0,
+          rotate: 35,
+          margin: 18,
+          width: 100,
+          overflow: 'break',
+          lineHeight: 14,
+        },
+        name: 'Genome size',
+        nameLocation: 'middle',
+        nameGap: 90,
+      },
+      yAxis: {
+        type: 'value',
+        name: 'Count',
+        nameLocation: 'middle',
+        nameGap: 45,
+        axisLabel: { margin: 12 },
+      },
+      series: [{ type: 'bar', data: histGenome.counts }],
+      grid: { left: 60, right: 20, top: 50, bottom: bottomPad },
+    } as echarts.EChartsOption;
+  }, [histGenome]);
 
   // 4) GC% histogram
   const histGC = useMemo(() => {
-    if (!colGC) return { labels: [], counts: [] };
-    return buildHistogram(vizRows.map(r => Number(r[colGC])));
+    const c = colGC;
+    if (!c) return { labels: [], counts: [] };
+    return buildHistogram(vizRows.map(r => Number(r[c])));
   }, [vizRows, colGC]);
 
-  const histGCOption = useMemo(() => ({
-    title: { text: 'GC% distribution', left: 'center' },
-    tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: histGC.labels, axisLabel: { rotate: 45 } },
-    yAxis: { type: 'value', name: 'Count' },
-    series: [{ type: 'bar', data: histGC.counts }],
-    grid: { left: 60, right: 20, top: 50, bottom: 80 }
-  }), [histGC]);
+  const histGCOption = useMemo(() => {
+    const bottomPad = estimateBottomPadding(histGC.labels);
+    return {
+      color: CHART_PALETTES.histGC,
+      title: { text: 'GC% distribution', left: 'center' },
+      tooltip: { trigger: 'axis' },
+      xAxis: {
+        type: 'category',
+        data: histGC.labels,
+        axisLabel: {
+          interval: 0,
+          rotate: 45,
+          margin: 18,
+          width: 90,
+          overflow: 'break',
+          lineHeight: 14,
+        },
+        name: 'GC %',
+        nameLocation: 'middle',
+        nameGap: 60,
+      },
+      yAxis: {
+        type: 'value',
+        name: 'Count',
+        nameLocation: 'middle',
+        nameGap: 45,
+        axisLabel: { margin: 12 },
+      },
+      series: [{ type: 'bar', data: histGC.counts }],
+      grid: { left: 60, right: 20, top: 50, bottom: bottomPad },
+    } as echarts.EChartsOption;
+  }, [histGC]);
 
   // Συνάρτηση για κεφαλαίο το πρώτο γράμμα και αντικατάσταση των κάτω παυλών με κενά
   const capitalize = (str: string) => {
-    const withSpaces = str.replace(/_/g, ' ');
-    return withSpaces
-      .split(' ')
-      .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-      .join(' ');
+    if (!str) return str;
+    const s = String(str).replace(/_/g, ' ');
+    return s.charAt(0).toUpperCase() + s.slice(1);
   };
 
   const reorderedColumns = useMemo(() => {
-    if (!assemblyColKey || !cols.includes('tax_name')) return visibleCols;
-    
-    // Αφαιρούμε τα assembly και tax_name από τις υπόλοιπες στήλες
-    const otherCols = visibleCols.filter(c => 
-      c !== assemblyColKey && c.toLowerCase() !== 'tax_name'
-    );
-    
-    // Επιστρέφουμε τη νέα σειρά: assembly -> tax_name -> υπόλοιπες
-    return [
-      assemblyColKey,
-      'tax_name',
-      ...otherCols
-    ];
-  }, [visibleCols, assemblyColKey]);
+    // both labels or dbNames can arrive in `cols`, so use smart matching
+    const asmKey = assemblyColKey;
+    const taxKey = findColSmart(cols, 'tax_name');
+    if (!asmKey || !taxKey) return visibleCols;
+    const otherCols = visibleCols.filter(c => c !== asmKey && c !== taxKey);
+    return [asmKey, taxKey, ...otherCols];
+  }, [visibleCols, assemblyColKey, cols]);
 
   // ---------------- render ----------------
   const topScrollRef = useRef<HTMLDivElement>(null);
@@ -479,7 +637,8 @@ export default function MetadataPage() {
   return (
     <Box sx={{ p: 2 }}>
       <Typography variant="h6" sx={{ mb: 2 }}>Species browser</Typography>
-      {/* TOP BAR — Superkingdom + Filter-on-taxonomy + Apply/Reset + Export + Columns */}
+
+      {/* TOP BAR */}
       <Paper
         elevation={1}
         sx={{ p: 2, mb: 2, display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}
@@ -493,12 +652,12 @@ export default function MetadataPage() {
             value={superkingdom}
             onChange={(_, v) => setSuperkingdom(v)}
             renderInput={(p) => (
-              <TextField 
-                {...p} 
-                size="small" 
-                placeholder="Select superkingdom" 
-                sx={{ width: 260 }} 
-                autoComplete="off"  // Added this line
+              <TextField
+                {...p}
+                size="small"
+                placeholder="Select superkingdom"
+                sx={{ width: 260 }}
+                autoComplete="off"
               />
             )}
           />
@@ -538,7 +697,7 @@ export default function MetadataPage() {
         <ColumnVisibilityMenu columns={cols} visibility={columnsVisible} onChange={setColumnsVisible} />
       </Paper>
 
-      {/* BASIC TAXONOMY (2×2) — appears only after pressing the button */}
+      {/* BASIC TAXONOMY */}
       <Collapse in={taxEnabled} mountOnEnter unmountOnExit>
         <Paper elevation={1} sx={{ p: 2, mb: 2 }}>
           <BasicTaxonomy
@@ -546,7 +705,6 @@ export default function MetadataPage() {
             value={basicTax}
             onChange={setBasicTax}
           />
-          {/* Advanced switch sits below basic filters */}
           <Box sx={{ mt: 2 }}>
             <FormControlLabel
               control={<Switch checked={advOpen} onChange={(_, v) => setAdvOpen(v)} />}
@@ -556,7 +714,7 @@ export default function MetadataPage() {
         </Paper>
       </Collapse>
 
-      {/* ADVANCED (4×4) — pure CSS grid, no MUI Grid */}
+      {/* ADVANCED */}
       <Collapse in={taxEnabled && advOpen} mountOnEnter unmountOnExit>
         <Paper elevation={1} sx={{ p: 2, mb: 2 }}>
           <Box
@@ -574,22 +732,22 @@ export default function MetadataPage() {
               label="Genome Size"
               min={rng.genome_size_min}
               max={rng.genome_size_max}
-              onMinChange={(v) => setRng((s) => ({ ...s, genome_size_min: v }))}
-              onMaxChange={(v) => setRng((s) => ({ ...s, genome_size_max: v }))}
+              onMinChange={(v) => setRng((s) => ({ ...s, genome_size_min: v })) }
+              onMaxChange={(v) => setRng((s) => ({ ...s, genome_size_max: v })) }
             />
             <RangeFilter
               label="Genome Size (Ungapped)"
               min={rng.genome_size_ungapped_min}
               max={rng.genome_size_ungapped_max}
-              onMinChange={(v) => setRng((s) => ({ ...s, genome_size_ungapped_min: v }))}
-              onMaxChange={(v) => setRng((s) => ({ ...s, genome_size_ungapped_max: v }))}
+              onMinChange={(v) => setRng((s) => ({ ...s, genome_size_ungapped_min: v })) }
+              onMaxChange={(v) => setRng((s) => ({ ...s, genome_size_ungapped_max: v })) }
             />
             <RangeFilter
               label="GC Percent"
               min={rng.gc_percent_min}
               max={rng.gc_percent_max}
-              onMinChange={(v) => setRng((s) => ({ ...s, gc_percent_min: v }))}
-              onMaxChange={(v) => setRng((s) => ({ ...s, gc_percent_max: v }))}
+              onMinChange={(v) => setRng((s) => ({ ...s, gc_percent_min: v })) }
+              onMaxChange={(v) => setRng((s) => ({ ...s, gc_percent_max: v })) }
             />
             <Box sx={{ display: 'grid', rowGap: 2 }}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -599,9 +757,9 @@ export default function MetadataPage() {
                 <TextField
                   size="small"
                   value={exact.assembly_eq}
-                  onChange={(e) => setExact((s) => ({ ...s, assembly_eq: e.target.value }))}
+                  onChange={(e) => setExact((s) => ({ ...s, assembly_eq: e.target.value })) }
                   sx={{ width: 240 }}
-                  autoComplete="off"  // Added this line
+                  autoComplete="off"
                 />
               </Box>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -611,9 +769,9 @@ export default function MetadataPage() {
                 <TextField
                   size="small"
                   value={exact.taxid_eq}
-                  onChange={(e) => setExact((s) => ({ ...s, taxid_eq: e.target.value }))}
+                  onChange={(e) => setExact((s) => ({ ...s, taxid_eq: e.target.value })) }
                   sx={{ width: 240 }}
-                  autoComplete="off"  // Added this line
+                  autoComplete="off"
                 />
               </Box>
             </Box>
@@ -637,7 +795,6 @@ export default function MetadataPage() {
               </Box>
             ) : (
               <>
-                {/* TOP pagination — δεξιά */}
                 <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
                   <TablePagination
                     component="div"
@@ -650,69 +807,51 @@ export default function MetadataPage() {
                   />
                 </Box>
 
-                
-                {/* RESULTS TABLE */}
+                {/* RESULTS TABLE with synced scrollbars */}
                 <Box>
-                  {/* Top scrollbar */}
                   <Box
                     ref={topScrollRef}
                     sx={{
                       overflowX: "auto",
                       height: 16,
-                      '&::-webkit-scrollbar': {
-                        height: 16,
-                        backgroundColor: '#f5f5f5'
-                      },
+                      '&::-webkit-scrollbar': { height: 16, backgroundColor: '#f5f5f5' },
                       '&::-webkit-scrollbar-thumb': {
                         backgroundColor: '#bdbdbd',
                         borderRadius: 8,
                         backgroundClip: 'padding-box',
                         border: '4px solid transparent',
                       },
-                      '&::-webkit-scrollbar-track': {
-                        backgroundColor: '#f5f5f5'
-                      }
+                      '&::-webkit-scrollbar-track': { backgroundColor: '#f5f5f5' }
                     }}
                     onScroll={(e) => syncScroll(e.currentTarget, bottomScrollRef.current)}
                   >
-                    <div style={{ 
-    width: '150%', // Αλλάζουμε το width εδώ
-    height: '1px',
-    visibility: 'hidden'
-  }} />
+                    <div style={{ width: '150%', height: '1px', visibility: 'hidden' }} />
                   </Box>
 
-                  {/* Table with bottom scrollbar */}
-                  <TableContainer 
+                  <TableContainer
                     ref={bottomScrollRef}
                     sx={{
                       width: '100%',
                       overflowX: 'auto',
-                      '&::-webkit-scrollbar': {
-                        height: 16,
-                        backgroundColor: '#f5f5f5'
-                      },
+                      '&::-webkit-scrollbar': { height: 16, backgroundColor: '#f5f5f5' },
                       '&::-webkit-scrollbar-thumb': {
                         backgroundColor: '#bdbdbd',
                         borderRadius: 8,
                         backgroundClip: 'padding-box',
                         border: '4px solid transparent',
                       },
-                      '&::-webkit-scrollbar-track': {
-                        backgroundColor: '#f5f5f5'
-                      }
+                      '&::-webkit-scrollbar-track': { backgroundColor: '#f5f5f5' }
                     }}
                     onScroll={(e) => syncScroll(e.currentTarget, topScrollRef.current)}
                   >
-                    <Table size="small" sx={{ 
-  width: 'max-content',
-  minWidth: '150%' // Προσθέτουμε αυτό για να εξασφαλίσουμε ότι ο πίνακας είναι αρκετά πλατύς
-}}>
+                    <Table size="small" sx={{ width: 'max-content', minWidth: '150%' }}>
                       <TableHead>
                         <TableRow>
                           {reorderedColumns.map((c) => (
                             <TableCell key={c}>
-                              {c.toLowerCase() === 'tax_name' ? 'Species' : capitalize(c)}
+                              {c.toLowerCase() === 'tax_name' || c === DB_TO_LABEL['tax_name']
+                                ? 'Species'
+                                : capitalize(c)}
                             </TableCell>
                           ))}
                         </TableRow>
@@ -735,9 +874,7 @@ export default function MetadataPage() {
                                       >
                                         {asm}
                                       </Link>
-                                    ) : (
-                                      ''
-                                    )}
+                                    ) : ('')}
                                   </TableCell>
                                 );
                               }
@@ -750,8 +887,6 @@ export default function MetadataPage() {
                   </TableContainer>
                 </Box>
 
-
-                {/* BOTTOM pagination */}
                 <TablePagination
                   component="div"
                   count={total}
@@ -790,11 +925,11 @@ export default function MetadataPage() {
                 {/* 1) Top Genera by avg density */}
                 <Paper variant="outlined" sx={{ p: 1 }}>
                   {genusBar.cats.length > 0 ? (
-                    <ReactECharts option={genusBarOption} style={{ height: 320 }} />
+                    <ReactECharts option={genusBarOption} style={{ height: 400 }} />
                   ) : (
                     <Box sx={{ p: 2, textAlign: 'center' }}>
                       <Typography variant="body2" color="text.secondary">
-                        Not enough data (need columns: genus, zdna_density).
+                        Not enough data (need columns: genus/Genus, obs_density_per_kb or zdna_density).
                       </Typography>
                     </Box>
                   )}
@@ -803,11 +938,11 @@ export default function MetadataPage() {
                 {/* 2) Scatter GC% vs density */}
                 <Paper variant="outlined" sx={{ p: 1 }}>
                   {scatterSeries.length > 0 ? (
-                    <ReactECharts option={scatterOption} style={{ height: 320 }} />
+                    <ReactECharts option={scatterOption} style={{ height: 400 }} />
                   ) : (
                     <Box sx={{ p: 2, textAlign: 'center' }}>
                       <Typography variant="body2" color="text.secondary">
-                        Not enough data (need columns: gc_percent, zdna_density).
+                        Not enough data (need columns: gc_percent/GC content (%), obs_density_per_kb or zdna_density).
                       </Typography>
                     </Box>
                   )}
@@ -816,11 +951,11 @@ export default function MetadataPage() {
                 {/* 3) Genome size histogram */}
                 <Paper variant="outlined" sx={{ p: 1 }}>
                   {histGenome.labels.length > 0 ? (
-                    <ReactECharts option={histGenomeOption} style={{ height: 320 }} />
+                    <ReactECharts option={histGenomeOption} style={{ height: 400 }} />
                   ) : (
                     <Box sx={{ p: 2, textAlign: 'center' }}>
                       <Typography variant="body2" color="text.secondary">
-                        Not enough data (need column: genome_size).
+                        Not enough data (need column: genome_size/Genome size).
                       </Typography>
                     </Box>
                   )}
@@ -829,11 +964,11 @@ export default function MetadataPage() {
                 {/* 4) GC% histogram */}
                 <Paper variant="outlined" sx={{ p: 1 }}>
                   {histGC.labels.length > 0 ? (
-                    <ReactECharts option={histGCOption} style={{ height: 320 }} />
+                    <ReactECharts option={histGCOption} style={{ height: 400 }} />
                   ) : (
                     <Box sx={{ p: 2, textAlign: 'center' }}>
                       <Typography variant="body2" color="text.secondary">
-                        Not enough data (need column: gc_percent).
+                        Not enough data (need column: gc_percent/GC content (%)).
                       </Typography>
                     </Box>
                   )}

@@ -57,7 +57,7 @@ function FullWidthChart({
   deps?: any[];
   [key: string]: any;
 }) {
-  const ref = useRef(null);
+  const ref = useRef<any>(null);
 
   useEffect(() => {
     // μικρή καθυστέρηση ώστε να έχει μετρηθεί σωστά το layout του Grid
@@ -499,21 +499,35 @@ export default function Explorer() {
 
       // 5) Box stats per chromosome (no WITH; subquery)
       const sqlBox = `
-        SELECT "chr",
-               MIN(s)            AS "min",
-               quantile(s,0.25)  AS "q1",
-               quantile(s,0.50)  AS "median",
-               quantile(s,0.75)  AS "q3",
-               MAX(s)            AS "max"
+        SELECT
+          chr, "min", q1, median, q3, "max"
         FROM (
-          SELECT "Chromosome" AS "chr", "Z-DNA Score" AS s
-          FROM data
-          WHERE ${whereSql}
-        ) f
-        GROUP BY "chr"
-        ORDER BY "median" DESC
-        LIMIT 15
+          SELECT
+            s.*,
+            ROW_NUMBER() OVER (ORDER BY median DESC) AS rn,
+            COUNT(*)    OVER ()                       AS total
+          FROM (
+            SELECT
+              "chr",
+              MIN(s)            AS "min",
+              quantile(s,0.25)  AS q1,
+              quantile(s,0.50)  AS median,
+              quantile(s,0.75)  AS q3,
+              MAX(s)            AS "max"
+            FROM (
+              SELECT "Chromosome" AS "chr", "Z-DNA Score" AS s
+              FROM data
+              WHERE ${whereSql}
+            ) f
+            GROUP BY "chr"
+          ) AS s
+        ) AS ranked
+        WHERE rn <= CASE WHEN total <= 23 THEN total ELSE 15 END
+        ORDER BY median DESC
+
       `;
+
+      console.log('Box Plot SQL Query:', sqlBox.replace('${whereSql}', whereSql));
 
       // 6) Length vs Score (sampled with LIMIT)
       const sqlLenScore = `
@@ -576,39 +590,105 @@ export default function Explorer() {
 
   /* ------------------------------- ECharts options ------------------------------ */
 
-  const histOpt = useMemo(() => {
-    const x = hist.map(d => Number(d.bin));
-    const y = hist.map(d => Number(d.n));
-    return {
-      tooltip: { trigger: 'axis' },
-      xAxis: { type: 'category', data: x, name: 'Score bin' },
-      yAxis: { type: 'value', name: 'Count' },
-      series: [{ type: 'bar', data: y }],
-      grid: { left: 50, right: 20, top: 30, bottom: 40 },
-    };
-  }, [hist]);
+  // Common grid settings with enough margin for axis labels
+  const commonGrid = {
+    left: '12%',    // More space for y-axis label
+    right: '4%',
+    top: '10%',
+    bottom: '12%',  // More space for x-axis label
+    containLabel: true
+  };
 
+  // Color constants
+  const CHART_COLORS = {
+    histogram: '#8884d8',      // Purple
+    genomicDist: '#82ca9d',    // Green
+    lenScore: '#ffc658',       // Gold
+    boxplot: '#ff7300',        // Orange
+    density: '#0088fe',        // Blue
+    scatter: '#ff6b81'         // Pink
+  };
+
+  // 1. Histogram
+  const histOpt = useMemo(() => ({
+    grid: commonGrid,
+    xAxis: {
+      type: 'category',
+      name: 'Z-DNA Score',
+      nameLocation: 'middle',
+      nameGap: 35,  // Distance of label from axis
+    },
+    yAxis: {
+      type: 'value',
+      name: 'Count',
+      nameLocation: 'middle',
+      nameGap: 45,  // Distance of label from axis
+    },
+    series: [{
+      type: 'bar',
+      data: hist.map(d => Number(d.n)),
+      itemStyle: {
+        color: CHART_COLORS.histogram
+      }
+    }],
+  }), [hist]);
+
+  // 2. Density
   const densityOpt = useMemo(() => {
     if (!density.length) return null;
     return {
-      tooltip: { trigger: 'axis' },
-      xAxis: { type: 'value', name: `${chr ?? ''} (window start)`, axisLabel: { formatter: (v: number) => fmtNum(v) } },
-      yAxis: { type: 'value', name: 'Sites / 100kb' },
-      series: [{ type: 'bar', data: density.map(d => [d.start, d.n]) }],
-      grid: { left: 60, right: 20, top: 30, bottom: 50 },
+      grid: commonGrid,
+      xAxis: {
+        type: 'value',
+        name: 'Position',
+        nameLocation: 'middle',
+        nameGap: 35,
+        axisLabel: { formatter: (v: number) => fmtNum(v) }
+      },
+      yAxis: {
+        type: 'value',
+        name: 'Sites / 100kb',
+        nameLocation: 'middle',
+        nameGap: 45
+      },
+      series: [{
+        type: 'bar',
+        data: density.map(d => [d.start, d.n]),
+        itemStyle: {
+          color: CHART_COLORS.density
+        }
+      }],
     };
-  }, [density, chr]);
+  }, [density]);
 
+  // 3. Scatter
   const scatterOpt = useMemo(() => {
     if (!scatter.length) return null;
     return {
-      tooltip: { trigger: 'item', formatter: (p: any) => `Start: ${fmtNum(p.value[0])}<br/>Score: ${Number(p.value[1]).toFixed(2)}` },
-      xAxis: { type: 'value', name: `${chr ?? ''} Start`, axisLabel: { formatter: (v: number) => fmtNum(v) } },
-      yAxis: { type: 'value', name: 'Z‑DNA Score' },
-      series: [{ type: 'scatter', symbolSize: 5, data: scatter.map(d => [d.x, d.y]) }],
-      grid: { left: 60, right: 20, top: 30, bottom: 50 },
+      grid: commonGrid,
+      xAxis: {
+        type: 'value',
+        name: 'Start Position',
+        nameLocation: 'middle',
+        nameGap: 35,
+        axisLabel: { formatter: (v: number) => fmtNum(v) }
+      },
+      yAxis: {
+        type: 'value',
+        name: 'Z-DNA Score',
+        nameLocation: 'middle',
+        nameGap: 45
+      },
+      series: [{
+        type: 'scatter',
+        symbolSize: 5,
+        data: scatter.map(d => [d.x, d.y]),
+        itemStyle: {
+          color: CHART_COLORS.scatter
+        }
+      }],
     };
-  }, [scatter, chr]);
+  }, [scatter]);
 
   /*
   const kmerOpt = useMemo(() => {
@@ -622,17 +702,35 @@ export default function Explorer() {
       grid: { left: 50, right: 20, top: 30, bottom: 80 },
     };
   }, [kmers]);
-*/
+  */
   const boxOpt = useMemo(() => {
     if (!boxRows.length) return null;
-    const cats = boxRows.map(b => b.chr);
-    const data = boxRows.map(b => [b.min, b.q1, b.median, b.q3, b.max]);
     return {
-      tooltip: { trigger: 'item' },
-      xAxis: { type: 'category', data: cats, axisLabel: { rotate: 45 } },
-      yAxis: { type: 'value', name: 'Z‑DNA Score' },
-      series: [{ type: 'boxplot', data }],
-      grid: { left: 60, right: 20, top: 30, bottom: 80 },
+      grid: {
+        ...commonGrid,
+        bottom: '15%'  // Extra space for rotated labels
+      },
+      xAxis: {
+        type: 'category',
+        name: 'Chromosome',
+        nameLocation: 'middle',
+        nameGap: 45,
+        axisLabel: { rotate: 45 }
+      },
+      yAxis: {
+        type: 'value',
+        name: 'Z-DNA Score',
+        nameLocation: 'middle',
+        nameGap: 45
+      },
+      series: [{
+        type: 'boxplot',
+        data: boxRows.map(b => [b.min, b.q1, b.median, b.q3, b.max]),
+        itemStyle: {
+          color: CHART_COLORS.boxplot,
+          borderColor: CHART_COLORS.boxplot
+        }
+      }],
     };
   }, [boxRows]);
 
@@ -640,10 +738,28 @@ export default function Explorer() {
     if (!lenScore.length) return null;
     return {
       tooltip: { trigger: 'item', formatter: (p: any) => `Length: ${fmtNum(p.value[0])} bp<br/>Score: ${Number(p.value[1]).toFixed(2)}` },
-      xAxis: { type: 'value', name: 'Length (bp)', axisLabel: { formatter: (v: number) => fmtNum(v) } },
-      yAxis: { type: 'value', name: 'Z‑DNA Score' },
-      series: [{ type: 'scatter', symbolSize: 5, data: lenScore.map(d => [d.len, d.score]) }],
-      grid: { left: 60, right: 20, top: 30, bottom: 50 },
+      xAxis: {
+        type: 'value',
+        name: 'Length (bp)',
+        nameLocation: 'middle',
+        nameGap: 35,
+        axisLabel: { formatter: (v: number) => fmtNum(v) }
+      },
+      yAxis: {
+        type: 'value',
+        name: 'Z‑DNA Score',
+        nameLocation: 'middle',
+        nameGap: 45
+      },
+      series: [{
+        type: 'scatter',
+        symbolSize: 5,
+        data: lenScore.map(d => [d.len, d.score]),
+        itemStyle: {
+          color: CHART_COLORS.lenScore
+        }
+      }],
+      grid: commonGrid
     };
   }, [lenScore]);
 
@@ -659,28 +775,26 @@ export default function Explorer() {
       },
       xAxis: {
         type: 'value',
-        name: 'Genomic Position',
+        name: 'Genomic Position (coordinate)',
+        nameLocation: 'middle',
+        nameGap: 35,
         axisLabel: { formatter: (v: number) => fmtNum(v) }
       },
       yAxis: {
         type: 'value',
-        name: 'Z-DNA Score'
+        name: 'Z-DNA Score',
+        nameLocation: 'middle',
+        nameGap: 45
       },
       series: [{
         type: 'scatter',
         symbolSize: 8,
         data: genomicDist.map(d => [d.pos, d.score]),
         itemStyle: {
-          color: '#4e79a7'
+          color: CHART_COLORS.genomicDist
         }
       }],
-      grid: { 
-        left: 60,
-        right: 20, 
-        top: 30, 
-        bottom: 50,
-        containLabel: true
-      }
+      grid: commonGrid
     };
   }, [genomicDist]);
 
@@ -1008,7 +1122,7 @@ export default function Explorer() {
     {/* Row 3 */}
     <Grid container spacing={2}>
       <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Density per 100kb {chr ? `— ${chr}` : '(select chromosome)'}</Typography>
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Z-DNA Density per 100 kb {chr ? `— ${chr}` : '(select chromosome)'}</Typography>
         {densityOpt ? (
           <FullWidthChart option={densityOpt} height={400} deps={[tab, chr, densityOpt]} />
         ) : (
@@ -1016,7 +1130,7 @@ export default function Explorer() {
         )}
       </Grid>
       <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Start vs Z-DNA Score {chr ? `— ${chr}` : '(select chromosome)'}</Typography>
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Z-DNA Score across Genomic Positions {chr ? `— ${chr}` : '(select chromosome)'}</Typography>
         {scatterOpt ? (
           <FullWidthChart option={scatterOpt} height={400} deps={[tab, chr, scatterOpt]} />
         ) : (
