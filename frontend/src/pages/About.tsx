@@ -74,12 +74,7 @@ const AboutDoc: FC = () => {
         <Typography variant="h5" sx={{ fontWeight: 700, color: 'text.primary' }}>
           About ZSeekerDB
         </Typography>
-        <Stack direction="row" spacing={2}>
-          <MuiLink href="/" underline="hover" color="primary">Home</MuiLink>
-          <MuiLink href="/search" underline="hover" color="primary">Search</MuiLink>
-          <MuiLink href="/downloads" underline="hover" color="primary">Downloads</MuiLink>
-          <MuiLink href="/api" underline="hover" color="primary">API</MuiLink>
-        </Stack>
+
       </Stack>
 
       <Grid container spacing={3}>
