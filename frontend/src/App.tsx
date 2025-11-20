@@ -16,37 +16,37 @@ function Home() {
   return (
     <Container maxWidth="lg">
       <Paper elevation={1} sx={{ p: 3 }}>
-        <Typography variant="h4" fontWeight={800} gutterBottom>Welcome</Typography>
+        <Typography variant="h4" fontWeight={800} gutterBottom>ZSeekerDB</Typography>
         <Typography paragraph>
-          This project is based on an extensive genomic dataset comprising billions of DNA sequence records, 
-          systematically linked with assembly-level metadata such as taxonomic classification, assembly identifiers, 
-          and chromosomal information. The dataset has been curated to enable large-scale investigation of 
-          genomic regions with potential Z-DNA conformational properties.
+          ZSeekerDB is a large-scale, comprehensive database cataloging predicted Z-DNA and Z-RNA sequences across all major branches of life. 
+          It provides interactive search, visualization, and download options, enabling independent exploration of Z-nucleic acid data. 
+          The current release includes over 280,000 genome assemblies and more than 850 million predicted Z-forming sequences. 
+          ZSeekerDB fills a long-standing gap between experimental discoveries and comparative genomics of non-B DNA structures.
         </Typography>
 
-        <Typography variant="h6" sx={{ mt: 3, mb: 2 }}>
+        <Typography paragraph>
           The platform provides researchers with:
         </Typography>
 
         <ul style={{ marginBottom: '24px' }}>
           <li>
             <Typography paragraph>
-              Comprehensive filtering capabilities across taxonomic, chromosomal, and sequence-level attributes.
+              Filtering options across taxonomic, chromosomal, and sequence-level attributes.
             </Typography>
           </li>
           <li>
             <Typography paragraph>
-              Integrated visualization and statistical tools for examining genomic distributions and patterns.
+              Integrated visualization tools for examining genomic distributions and patterns.
             </Typography>
           </li>
           <li>
             <Typography paragraph>
-              Optimized high-performance query execution designed to support analyses at the scale of millions of chromosomes.
+              High-performance query execution optimized for large-scale comparative genomic analyses.
             </Typography>
           </li>
           <li>
             <Typography paragraph>
-              Contextualized data exploration that combines sequence information with rich metadata for deeper biological interpretation.
+              Contextualized data exploration combining sequence information with rich metadata for clearer biological interpretation.
             </Typography>
           </li>
         </ul>

@@ -1,5 +1,7 @@
+// frontend/src/pages/MetadataPage.tsx
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
+import * as echarts from 'echarts';
 import {
   Autocomplete,
   Box,
@@ -153,7 +155,7 @@ function findFirstSmart(cols: string[], desiredDbNames: string[]): string | null
   return null;
 }
 
-// ---- dynamic bottom padding helper (for long/rotated labels)
+// ---- dynamic bottom padding + chart height helper (for long/rotated labels)
 function estimateBottomPadding(
   labels: string[],
   {
@@ -164,6 +166,18 @@ function estimateBottomPadding(
 ) {
   const longest = labels.reduce((m, s) => Math.max(m, (s?.length ?? 0)), 0);
   return Math.min(max, Math.round(min + longest * perChar));
+}
+
+// Βασικό ύψος για charts + helper που αυξάνει το ύψος όταν μεγαλώνει το bottom
+const BASE_CHART_HEIGHT = 320;     // «κανονικό» ύψος plot area
+const DEFAULT_GRID_BOTTOM = 90;    // η default τιμή για grid.bottom στα bar/hist
+const MIN_CHART_HEIGHT = 380;
+const MAX_CHART_HEIGHT = 650;
+
+function chartHeightFromBottom(bottom: number) {
+  const extra = bottom - DEFAULT_GRID_BOTTOM;
+  const h = BASE_CHART_HEIGHT + Math.max(0, extra);
+  return Math.max(MIN_CHART_HEIGHT, Math.min(MAX_CHART_HEIGHT, h));
 }
 
 // ---------------- page ----------------
@@ -208,12 +222,14 @@ export default function MetadataPage() {
   // Table + pagination
   const [rows, setRows] = useState<any[]>([]);
   const [cols, setCols] = useState<string[]>([]);
+
+  // visibility keyed by LABEL
   const [columnsVisible, setColumnsVisible] = useState<Record<string, boolean>>(() => {
-    // Use labels from METADATA_COLUMNS as starting visibility map
     const v: Record<string, boolean> = {};
     METADATA_COLUMNS.forEach(col => { v[col.label] = !col.hidden; });
     return v;
   });
+
   const [loading, setLoading] = useState(false);
   const [total, setTotal] = useState(0);
   const [limit, setLimit] = useState(25);
@@ -247,13 +263,53 @@ export default function MetadataPage() {
     [cols]
   );
 
+  // assembly key from returned cols (used mainly by link)
   const assemblyColKey = useMemo(
     () => findColSmart(cols, 'assembly'),
     [cols]
   );
 
-  const visibleCols = useMemo(() => cols.filter(c => columnsVisible[c] !== false), [cols, columnsVisible]);
+  // --------- column model based on METADATA_COLUMNS (ORDER + LABELS) ---------
+  type ColumnDef = {
+    dbName: string;
+    label: string;
+    hidden?: boolean;
+    key: string | null; // name as returned from backend in `cols` / row-objects
+  };
 
+  const columnDefs: ColumnDef[] = useMemo(
+    () =>
+      METADATA_COLUMNS.map(col => ({
+        dbName: col.dbName,
+        label: col.label,
+        hidden: col.hidden,
+        key: findColSmart(cols, col.dbName),
+      })),
+    [cols]
+  );
+
+  const visibleColumnDefs = useMemo(
+    () =>
+      columnDefs.filter(
+        c => c.key && columnsVisible[c.label] !== false
+      ),
+    [columnDefs, columnsVisible]
+  );
+
+  // Εκτίμηση συνολικού πλάτους table με βάση τα ορατά columns
+  const estimatedTableWidth = useMemo(
+    () => Math.max(visibleColumnDefs.length * 180, 800),
+    [visibleColumnDefs.length]
+  );
+
+
+  // tax_name key for default sorting by Species
+  const speciesKey = useMemo(() => {
+    const c = columnDefs.find(col => col.dbName === 'tax_name');
+    return c?.key ?? null;
+  }, [columnDefs]);
+
+  // rows με formatted density
   const displayRows = useMemo(() => {
     if (!densityColKey) return rows;
     return rows.map((r) => {
@@ -263,6 +319,18 @@ export default function MetadataPage() {
       return r;
     });
   }, [rows, densityColKey]);
+
+  // default sort by Species / tax_name (within current page)
+  const sortedRows = useMemo(() => {
+    if (!speciesKey) return displayRows;
+    const arr = [...displayRows];
+    arr.sort((a, b) => {
+      const av = (a[speciesKey] ?? '') as string;
+      const bv = (b[speciesKey] ?? '') as string;
+      return String(av).localeCompare(String(bv));
+    });
+    return arr;
+  }, [displayRows, speciesKey]);
 
   // ---- build ONLY filters (no limit/offset) ----
   const buildFilterParams = () => {
@@ -429,6 +497,17 @@ export default function MetadataPage() {
     return { cats: top.map(x => x.g), vals: top.map(x => Number(x.avg.toFixed(2))) };
   }, [vizRows, vizDensityCol, colGenus]);
 
+  // dynamic bottom + height για το bar των genera
+  const genusBottomPad = useMemo(
+    () => estimateBottomPadding(genusBar.cats),
+    [genusBar]
+  );
+
+  const genusChartHeight = useMemo(
+    () => chartHeightFromBottom(genusBottomPad),
+    [genusBottomPad]
+  );
+
   const genusBarOption = useMemo(() => ({
     title: { text: 'Top Genera by avg Z-DNA density (/kb)', left: 'center' },
     tooltip: { trigger: 'axis' },
@@ -438,7 +517,7 @@ export default function MetadataPage() {
       axisLabel: { rotate: 35, margin: 16 },
       name: 'Genus',
       nameLocation: 'middle',
-      nameGap: 80,
+      nameGap: 130,
     },
     yAxis: {
       type: 'value',
@@ -448,13 +527,12 @@ export default function MetadataPage() {
       axisLabel: { margin: 12 },
     },
     series: [{
-    type: 'bar',
-    data: genusBar.vals,
-    // προαιρετικά “κλειδώνουμε” την πρώτη απόχρωση για ομοιομορφία
-    itemStyle: { color: CHART_PALETTES.genusBar[0] }
+      type: 'bar',
+      data: genusBar.vals,
+      itemStyle: { color: CHART_PALETTES.genusBar[0] }
     }],
-    grid: { left: 60, right: 20, top: 50, bottom: 90 }
-  }), [genusBar]);
+    grid: { left: 60, right: 20, top: 50, bottom: genusBottomPad }
+  }), [genusBar, genusBottomPad]);
 
   // 2) Scatter: GC% vs Z-DNA density, bubble ~ genome_size, color = superkingdom
   const scatterData = useMemo(() => {
@@ -536,38 +614,54 @@ export default function MetadataPage() {
     return buildHistogram(vizRows.map(r => Number(r[colGSizeLbl])));
   }, [vizRows, colGSizeLbl]);
 
+const histGenomeBottom = useMemo(
+  () => estimateBottomPadding(histGenome.labels, {
+    min: 120,   // λίγο μεγαλύτερη βάση
+    perChar: 4, // πιο γενναιόδωρος χώρος ανά χαρακτήρα
+    max: 260,
+  }),
+  [histGenome]
+);
+
+
+  const histGenomeHeight = useMemo(
+    () => chartHeightFromBottom(histGenomeBottom),
+    [histGenomeBottom]
+  );
+
   const histGenomeOption = useMemo(() => {
-    const bottomPad = estimateBottomPadding(histGenome.labels);
-    return {
-      color: CHART_PALETTES.histGenome,
-      title: { text: 'Genome Size distribution', left: 'center' },
-      tooltip: { trigger: 'axis' },
-      xAxis: {
-        type: 'category',
-        data: histGenome.labels,
-        axisLabel: {
-          interval: 0,
-          rotate: 35,
-          margin: 18,
-          width: 100,
-          overflow: 'break',
-          lineHeight: 14,
-        },
-        name: 'Genome size',
-        nameLocation: 'middle',
-        nameGap: 90,
+  return {
+    color: CHART_PALETTES.histGenome,
+    title: { text: 'Genome Size distribution', left: 'center' },
+    tooltip: { trigger: 'axis' },
+    xAxis: {
+      type: 'category',
+      data: histGenome.labels,
+      axisLabel: {
+        interval: 0,
+        rotate: 70,      // πιο «όρθια» labels
+        margin: 18,
+        width: 80,       // περιορισμένο πλάτος
+        overflow: 'break',
+        lineHeight: 12,
+        fontSize: 9,
+        hideOverlap: true,
       },
-      yAxis: {
-        type: 'value',
-        name: 'Count',
-        nameLocation: 'middle',
-        nameGap: 45,
-        axisLabel: { margin: 12 },
-      },
-      series: [{ type: 'bar', data: histGenome.counts }],
-      grid: { left: 60, right: 20, top: 50, bottom: bottomPad },
-    } as echarts.EChartsOption;
-  }, [histGenome]);
+      name: 'Genome size',
+      nameLocation: 'middle',
+      nameGap: 120,
+    },
+    yAxis: {
+      type: 'value',
+      name: 'Count',
+      nameLocation: 'middle',
+      nameGap: 45,
+      axisLabel: { margin: 12 },
+    },
+    series: [{ type: 'bar', data: histGenome.counts }],
+    grid: { left: 60, right: 20, top: 50, bottom: histGenomeBottom },
+  } as echarts.EChartsOption;
+}, [histGenome, histGenomeBottom]);
 
   // 4) GC% histogram
   const histGC = useMemo(() => {
@@ -576,8 +670,17 @@ export default function MetadataPage() {
     return buildHistogram(vizRows.map(r => Number(r[c])));
   }, [vizRows, colGC]);
 
+  const histGCBottom = useMemo(
+    () => estimateBottomPadding(histGC.labels),
+    [histGC]
+  );
+
+  const histGCHeight = useMemo(
+    () => chartHeightFromBottom(histGCBottom),
+    [histGCBottom]
+  );
+
   const histGCOption = useMemo(() => {
-    const bottomPad = estimateBottomPadding(histGC.labels);
     return {
       color: CHART_PALETTES.histGC,
       title: { text: 'GC% distribution', left: 'center' },
@@ -605,9 +708,9 @@ export default function MetadataPage() {
         axisLabel: { margin: 12 },
       },
       series: [{ type: 'bar', data: histGC.counts }],
-      grid: { left: 60, right: 20, top: 50, bottom: bottomPad },
+      grid: { left: 60, right: 20, top: 50, bottom: histGCBottom },
     } as echarts.EChartsOption;
-  }, [histGC]);
+  }, [histGC, histGCBottom]);
 
   // Συνάρτηση για κεφαλαίο το πρώτο γράμμα και αντικατάσταση των κάτω παυλών με κενά
   const capitalize = (str: string) => {
@@ -616,22 +719,21 @@ export default function MetadataPage() {
     return s.charAt(0).toUpperCase() + s.slice(1);
   };
 
-  const reorderedColumns = useMemo(() => {
-    // both labels or dbNames can arrive in `cols`, so use smart matching
-    const asmKey = assemblyColKey;
-    const taxKey = findColSmart(cols, 'tax_name');
-    if (!asmKey || !taxKey) return visibleCols;
-    const otherCols = visibleCols.filter(c => c !== asmKey && c !== taxKey);
-    return [asmKey, taxKey, ...otherCols];
-  }, [visibleCols, assemblyColKey, cols]);
-
   // ---------------- render ----------------
   const topScrollRef = useRef<HTMLDivElement>(null);
   const bottomScrollRef = useRef<HTMLDivElement>(null);
+  const isSyncingRef = useRef(false);
 
   const syncScroll = (source: HTMLElement, target: HTMLElement | null) => {
-    if (!source || !target) return;
+    if (!target) return;
+    if (isSyncingRef.current) return; // μην κάνεις «μπαλάκι» τα events
+
+    isSyncingRef.current = true;
     target.scrollLeft = source.scrollLeft;
+    // reset στο επόμενο animation frame
+    window.requestAnimationFrame(() => {
+      isSyncingRef.current = false;
+    });
   };
 
   return (
@@ -694,7 +796,12 @@ export default function MetadataPage() {
         </Menu>
 
         <Divider orientation="vertical" flexItem sx={{ mx: 1 }} />
-        <ColumnVisibilityMenu columns={cols} visibility={columnsVisible} onChange={setColumnsVisible} />
+        {/* column selector με labels από METADATA_COLUMNS */}
+        <ColumnVisibilityMenu
+          columns={METADATA_COLUMNS.map(c => c.label)}
+          visibility={columnsVisible}
+          onChange={setColumnsVisible}
+        />
       </Paper>
 
       {/* BASIC TAXONOMY */}
@@ -825,7 +932,13 @@ export default function MetadataPage() {
                     }}
                     onScroll={(e) => syncScroll(e.currentTarget, bottomScrollRef.current)}
                   >
-                    <div style={{ width: '150%', height: '1px', visibility: 'hidden' }} />
+                    <div
+                      style={{
+                        width: `${estimatedTableWidth}px`,
+                        height: 1,
+                        visibility: 'hidden',
+                      }}
+                    />
                   </Box>
 
                   <TableContainer
@@ -844,25 +957,39 @@ export default function MetadataPage() {
                     }}
                     onScroll={(e) => syncScroll(e.currentTarget, topScrollRef.current)}
                   >
-                    <Table size="small" sx={{ width: 'max-content', minWidth: '150%' }}>
+                    <Table
+                      size="small"
+                      sx={{ width: 'max-content', minWidth: `${estimatedTableWidth}px` }}
+                    >
+
                       <TableHead>
                         <TableRow>
-                          {reorderedColumns.map((c) => (
-                            <TableCell key={c}>
-                              {c.toLowerCase() === 'tax_name' || c === DB_TO_LABEL['tax_name']
-                                ? 'Species'
-                                : capitalize(c)}
+                          {visibleColumnDefs.map((c) => (
+                            <TableCell key={c.key!}>
+                              {/* label από METADATA_COLUMNS, ειδική μεταχείριση species αν θες */}
+                              {c.label || capitalize(c.key!)}
                             </TableCell>
                           ))}
                         </TableRow>
                       </TableHead>
                       <TableBody>
-                        {displayRows.map((row, i) => (
+                        {sortedRows.map((row, i) => (
                           <TableRow key={row.id ?? `${page}-${i}`}>
-                            {reorderedColumns.map((colKey) => {
-                              const val = row[colKey];
-                              if (assemblyColKey && colKey === assemblyColKey) {
-                                const asm = String(val ?? '');
+                            {visibleColumnDefs.map((colMeta) => {
+                              const colKey = colMeta.key!;
+                              const rawVal = row[colKey];
+                              const isEmpty =
+                                rawVal === null ||
+                                rawVal === undefined ||
+                                rawVal === '';
+                              const displayVal = isEmpty ? '-' : String(rawVal);
+
+                              // Assembly column as link
+                              if (
+                                assemblyColKey &&
+                                colKey === assemblyColKey
+                              ) {
+                                const asm = String(rawVal ?? '');
                                 return (
                                   <TableCell key={colKey}>
                                     {asm ? (
@@ -874,11 +1001,18 @@ export default function MetadataPage() {
                                       >
                                         {asm}
                                       </Link>
-                                    ) : ('')}
+                                    ) : (
+                                      '-'
+                                    )}
                                   </TableCell>
                                 );
                               }
-                              return <TableCell key={colKey}>{String(val ?? '')}</TableCell>;
+
+                              return (
+                                <TableCell key={colKey}>
+                                  {displayVal}
+                                </TableCell>
+                              );
                             })}
                           </TableRow>
                         ))}
@@ -925,7 +1059,7 @@ export default function MetadataPage() {
                 {/* 1) Top Genera by avg density */}
                 <Paper variant="outlined" sx={{ p: 1 }}>
                   {genusBar.cats.length > 0 ? (
-                    <ReactECharts option={genusBarOption} style={{ height: 400 }} />
+                    <ReactECharts option={genusBarOption} style={{ height: genusChartHeight }} />
                   ) : (
                     <Box sx={{ p: 2, textAlign: 'center' }}>
                       <Typography variant="body2" color="text.secondary">
@@ -938,7 +1072,7 @@ export default function MetadataPage() {
                 {/* 2) Scatter GC% vs density */}
                 <Paper variant="outlined" sx={{ p: 1 }}>
                   {scatterSeries.length > 0 ? (
-                    <ReactECharts option={scatterOption} style={{ height: 400 }} />
+                    <ReactECharts option={scatterOption} style={{ height: 420 }} />
                   ) : (
                     <Box sx={{ p: 2, textAlign: 'center' }}>
                       <Typography variant="body2" color="text.secondary">
@@ -951,7 +1085,7 @@ export default function MetadataPage() {
                 {/* 3) Genome size histogram */}
                 <Paper variant="outlined" sx={{ p: 1 }}>
                   {histGenome.labels.length > 0 ? (
-                    <ReactECharts option={histGenomeOption} style={{ height: 400 }} />
+                    <ReactECharts option={histGenomeOption} style={{ height: histGenomeHeight }} />
                   ) : (
                     <Box sx={{ p: 2, textAlign: 'center' }}>
                       <Typography variant="body2" color="text.secondary">
@@ -964,7 +1098,7 @@ export default function MetadataPage() {
                 {/* 4) GC% histogram */}
                 <Paper variant="outlined" sx={{ p: 1 }}>
                   {histGC.labels.length > 0 ? (
-                    <ReactECharts option={histGCOption} style={{ height: 400 }} />
+                    <ReactECharts option={histGCOption} style={{ height: histGCHeight }} />
                   ) : (
                     <Box sx={{ p: 2, textAlign: 'center' }}>
                       <Typography variant="body2" color="text.secondary">

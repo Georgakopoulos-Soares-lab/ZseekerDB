@@ -180,6 +180,15 @@ export default function MetadataStats() {
   const [minGC, setMinGC] = useState<number | null>(null);
   const [maxGC, setMaxGC] = useState<number | null>(null);
 
+  // Add new state variables for the additional metrics
+  const [totalSuperkingdoms, setTotalSuperkingdoms] = useState<number | null>(null);
+  const [totalKingdoms, setTotalKingdoms] = useState<number | null>(null);
+  const [totalPhylum, setTotalPhylum] = useState<number | null>(null);
+  const [totalClasses, setTotalClasses] = useState<number | null>(null);
+  const [totalOrders, setTotalOrders] = useState<number | null>(null);
+  const [totalFamilies, setTotalFamilies] = useState<number | null>(null);
+  const [totalGenus, setTotalGenus] = useState<number | null>(null);
+
   // side metrics
   const [superkingdoms, setSuperkingdoms] = useState<KV[]>([]);
   const [topKingdoms, setTopKingdoms] = useState<KV[]>([]);
@@ -201,11 +210,19 @@ export default function MetadataStats() {
         const overviewSql = `
           SELECT
             COUNT(*)                                AS total_assemblies,
-            COUNT(DISTINCT taxid)                   AS unique_taxids,
+            COUNT(distinct superkingdom)            AS total_superkingdoms,
+            count(distinct kingdom) AS total_kingdoms,
+            count(distinct phylum) AS total_phylum,
+            count(distinct class) AS total_classes,
+            count(distinct "order") AS total_orders,
+            count(distinct family) AS total_families, 
+            count(distinct genus) AS total_genus,
+            count(distinct genus) AS total_genus,
+            COUNT(DISTINCT tax_name)                   AS unique_species,
             AVG(try_cast(genome_size AS DOUBLE))    AS avg_genome_size,
             MIN(try_cast(genome_size AS DOUBLE))    AS min_genome_size,
             MAX(try_cast(genome_size AS DOUBLE))    AS max_genome_size,
-            AVG(try_cast(gc_percent  AS DOUBLE))    AS avg_gc,
+            ROUND(AVG(try_cast(gc_percent  AS DOUBLE)), 2)    AS avg_gc,
             MIN(try_cast(gc_percent  AS DOUBLE))    AS min_gc,
             MAX(try_cast(gc_percent  AS DOUBLE))    AS max_gc
           FROM metadata
@@ -236,7 +253,7 @@ export default function MetadataStats() {
         const topGSql = `
           SELECT genus AS label, COUNT(*) AS n
           FROM metadata
-          WHERE genus IS NOT NULL AND genus <> ''
+          WHERE genus IS NOT NULL AND genus <> '' AND genus NOT LIKE '%unclassified%'
           GROUP BY 1
           ORDER BY n DESC
           LIMIT 5
@@ -264,13 +281,22 @@ export default function MetadataStats() {
         if (cancelled) return;
 
         setTotalAssemblies(Number(ov?.total_assemblies ?? null));
-        setUniqueTaxids(Number(ov?.unique_taxids ?? null));
+        setUniqueTaxids(Number(ov?.unique_species ?? null));
         setAvgGenome(Number(ov?.avg_genome_size ?? null));
         setMinGenome(Number(ov?.min_genome_size ?? null));
         setMaxGenome(Number(ov?.max_genome_size ?? null));
         setAvgGC(Number(ov?.avg_gc ?? null));
         setMinGC(Number(ov?.min_gc ?? null));
         setMaxGC(Number(ov?.max_gc ?? null));
+
+        // Set the new metrics
+        setTotalSuperkingdoms(Number(ov?.total_superkingdoms ?? null));
+        setTotalKingdoms(Number(ov?.total_kingdoms ?? null));
+        setTotalPhylum(Number(ov?.total_phylum ?? null));
+        setTotalClasses(Number(ov?.total_classes ?? null));
+        setTotalOrders(Number(ov?.total_orders ?? null));
+        setTotalFamilies(Number(ov?.total_families ?? null));
+        setTotalGenus(Number(ov?.total_genus ?? null));
 
         setSuperkingdoms(sup);
         setTopKingdoms(tK);
@@ -412,16 +438,25 @@ const treemapOption = useMemo(() => ({
 >
   {[
     { title: 'Total Assemblies', value: fmtInt(totalAssemblies) },
-    { title: 'Total Orders', value: fmtInt(uniqueTaxids) },
-    { title: 'Total Families', value: fmtBig(avgGenome) },
-    { title: 'Total Genera', value: fmtBig(minGenome) },
-    { title: 'Total Motifs Analyzed', value: fmtBig(maxGenome) },
-    { title: 'Total Motif Classes', value: fmtPercent(avgGC, 2) }
+    { title: 'Total Superkingdoms', value: fmtInt(totalSuperkingdoms) },
+    { title: 'Total Kingdoms', value: fmtInt(totalKingdoms) },
+    { title: 'Total Phylum', value: fmtInt(totalPhylum) },
+    { title: 'Total Classes', value: fmtInt(totalClasses) },
+    { title: 'Total Orders', value: fmtInt(totalOrders) },
+    { title: 'Total Families', value: fmtInt(totalFamilies) },
+    { title: 'Total Genus', value: fmtInt(totalGenus) },
+    { title: 'Total Species', value: fmtInt(uniqueTaxids) },
+    { title: 'Average Genome Size', value: Number(avgGenome).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) },
+    { title: 'Min Genome Size', value: fmtBig(minGenome) },
+    { title: 'Max Genome Size', value: fmtBig(maxGenome) },
+    { title: 'Average %GC', value: fmtPercent(avgGC, 2) },
+    { title: 'Min %GC', value: fmtPercent(minGC, 2) },
+    { title: 'Max %GC', value: fmtPercent(maxGC, 2) }
   ].map((kpi) => (
-    <Grid key={kpi.title} item xs={12} sm={6} md={4}>
+    <Grid key={kpi.title} item xs={12} sm={6} md={4} lg={3}>
       <Paper 
         sx={{ 
-          p: 4, 
+          p: 3, 
           textAlign: 'center',
           bgcolor: 'background.paper',
           borderRadius: 2,
@@ -432,10 +467,10 @@ const treemapOption = useMemo(() => ({
         }}
       >
         <Typography 
-          variant="h3" 
+          variant="h4" 
           sx={{ 
             mb: 1,
-            fontSize: '2.5rem',
+            fontSize: '2rem',
             fontWeight: 500,
             color: 'primary.main'
           }}
@@ -443,7 +478,7 @@ const treemapOption = useMemo(() => ({
           {kpi.value}
         </Typography>
         <Typography 
-          variant="h6"
+          variant="body1"
           sx={{
             fontWeight: 400,
             color: 'text.secondary'

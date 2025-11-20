@@ -30,8 +30,9 @@ export const METADATA_COLUMNS: MetadataColumn[] = [
   { dbName: "taxid", label: "Taxon ID", hidden: false },
   { dbName: "assembly_level", label: "Assembly level", hidden: true },
   { dbName: "genome_size", label: "Genome size", hidden: false },
-  { dbName: "gc_percent", label: "GC content (%)", hidden: false },
+  { dbName: "gc_percent", label: "%GC", hidden: false },
   { dbName: "superkingdom", label: "Superkingdom", hidden: false },
+  { dbName: "viral_realm", label: "Viral realm", hidden: false },
   { dbName: "kingdom", label: "Kingdom", hidden: false },
   { dbName: "phylum", label: "Phylum", hidden: false },
   { dbName: "class", label: "Class", hidden: false },
@@ -39,12 +40,11 @@ export const METADATA_COLUMNS: MetadataColumn[] = [
   { dbName: "family", label: "Family", hidden: false },
   { dbName: "genus", label: "Genus", hidden: false },
   { dbName: "tax_name", label: "Specie", hidden: false },
-  { dbName: "is_t2t", label: "T2T", hidden: false },
-  { dbName: "viral_realm", label: "Viral realm", hidden: false },
+  { dbName: "is_t2t", label: "Is T2T", hidden: false },
   { dbName: "updated_tax_name", label: "Infraspecific name", hidden: false },
-  { dbName: "obs_zbp", label: "Z-DNA bps", hidden: false },
-  { dbName: "obs_density_per_kb", label: "Z-DNA density (per kb)", hidden: false },
-  { dbName: "obs_n_zdna", label: "Number of predictions", hidden: false },
+  { dbName: "obs_zbp", label: " Z-DNA/-RNA bases count", hidden: false },
+  { dbName: "obs_density_per_kb", label: "Z-DNA/-RNA density per kb", hidden: false },
+  { dbName: "obs_n_zdna", label: "Z-DNA/-RNA predictions count", hidden: false },
 ];
 
 // Create a map for quick label lookups
@@ -56,6 +56,8 @@ const LABELS: Record<string, string> = Object.fromEntries(
 const DEFAULT_VISIBILITY: Record<string, boolean> = Object.fromEntries(
   METADATA_COLUMNS.map(col => [col.dbName, !col.hidden])
 );
+
+const EMPTY_DISPLAY = '-';
 
 function QuickToolbar() {
   return (
@@ -72,22 +74,32 @@ export default function DataTable({ rows, columns, visible, height = 480 }: Prop
     if (Object.prototype.hasOwnProperty.call(visible, field)) {
       return !!visible[field];
     }
-    
+
     // Otherwise use the default from METADATA_COLUMNS
     const column = METADATA_COLUMNS.find(col => col.dbName === field);
     if (column) {
       return !column.hidden;
     }
-    
+
     // If field not in METADATA_COLUMNS, show by default
     return true;
   }, [visible]);
 
+  // ---- ΝΕΟ: ένωση columns + κλειδιών από rows ----
+  const allColumns = React.useMemo(() => {
+    const set = new Set<string>(columns);
+    rows.forEach(r => {
+      if (!r) return;
+      Object.keys(r).forEach(k => set.add(k));
+    });
+    return Array.from(set);
+  }, [columns, rows]);
+
   const gridColumns: GridColDef[] = React.useMemo(() => {
     // Sort columns to match METADATA_COLUMNS order
     const columnOrder = new Map(METADATA_COLUMNS.map((col, i) => [col.dbName, i]));
-    
-    return columns
+
+    return [...allColumns]  // μην πειράζουμε το original array
       .sort((a, b) => {
         const orderA = columnOrder.get(a) ?? Number.MAX_SAFE_INTEGER;
         const orderB = columnOrder.get(b) ?? Number.MAX_SAFE_INTEGER;
@@ -97,12 +109,18 @@ export default function DataTable({ rows, columns, visible, height = 480 }: Prop
         field,
         headerName: LABELS[field] ?? field,
         flex: 1,
-        hide: !isVisible(field), // This will now use the hidden property
+        hide: !isVisible(field), // uses hidden + selector
         sortable: true,
         minWidth: 140,
+        // πραγματική τιμή για filtering / sorting
         valueGetter: (params) => params.row?.[field],
+        // εμφάνιση: δείξε "-" αν είναι κενό
+        valueFormatter: (params) => {
+          const v = params.value;
+          return v === null || v === undefined || v === '' ? EMPTY_DISPLAY : String(v);
+        },
       }));
-  }, [columns, isVisible]);
+  }, [allColumns, isVisible]);
 
   return (
     <Box sx={{ width: '100%', height }}>
@@ -115,6 +133,8 @@ export default function DataTable({ rows, columns, visible, height = 480 }: Prop
         slots={{ toolbar: QuickToolbar }}
         initialState={{
           pagination: { paginationModel: { pageSize: 25 } },
+          // default sorting by Specie (tax_name)
+          sorting: { sortModel: [{ field: 'tax_name', sort: 'asc' }] },
         }}
         pageSizeOptions={[10, 25, 50, 100]}
       />

@@ -317,11 +317,14 @@ export default function Explorer() {
           SELECT DISTINCT "Chromosome" AS label
           FROM data
           WHERE ${where} ${andPrefix}
-          ORDER BY 1
           LIMIT ${AUTOCOMPLETE_LIMIT}
         `;
         const opts = await runSQL<KV>(sql);
-        if (!dead) setChrOpts(opts);
+        
+        // Apply natural sort to chromosome options
+        const sorted = opts.sort((a, b) => naturalSort(a.label, b.label));
+        
+        if (!dead) setChrOpts(sorted);
       } finally {
         if (!dead) setLoadingChr(false);
       }
@@ -488,16 +491,16 @@ export default function Explorer() {
         LIMIT ${SCATTER_SAMPLE}
       ` : null;
 
-      // 4) Top central 8‑mers
+      // 4) Genomic distribution
       const sqlGenomicDist = `
         SELECT "Start" as pos, "Z-DNA Score" as score 
         FROM data
         WHERE ${whereSql}
-        ORDER BY "Start"
+        ORDER BY random()
         LIMIT ${SCATTER_SAMPLE}
       `;
 
-      // 5) Box stats per chromosome (no WITH; subquery)
+      // 5) Box stats per chromosome (up to 30 chromosomes)
       const sqlBox = `
         SELECT
           chr, "min", q1, median, q3, "max"
@@ -522,12 +525,9 @@ export default function Explorer() {
             GROUP BY "chr"
           ) AS s
         ) AS ranked
-        WHERE rn <= CASE WHEN total <= 23 THEN total ELSE 15 END
+        WHERE rn <= CASE WHEN total <= 30 THEN total ELSE 30 END
         ORDER BY median DESC
-
       `;
-
-      console.log('Box Plot SQL Query:', sqlBox.replace('${whereSql}', whereSql));
 
       // 6) Length vs Score (sampled with LIMIT)
       const sqlLenScore = `
@@ -609,29 +609,127 @@ export default function Explorer() {
     scatter: '#ff6b81'         // Pink
   };
 
-  // 1. Histogram
-  const histOpt = useMemo(() => ({
+// 1. Histogram
+
+const histOpt = useMemo(() => {
+  const bins   = hist.map(d => Number(d.bin));
+  const counts = hist.map(d => Number(d.n));
+
+  // Εκτίμηση πλάτους bin από τα ίδια τα δεδομένα
+  let binWidth = 1;
+  if (bins.length > 1) {
+    const diffs: number[] = [];
+    for (let i = 1; i < bins.length; i++) {
+      const diff = bins[i] - bins[i - 1];
+      if (diff > 0) diffs.push(diff);
+    }
+    if (diffs.length) {
+      binWidth = Math.min(...diffs);
+    }
+  }
+
+  const formatRange = (start: number) => {
+    // αν το binWidth είναι «ωραίο» ακέραιο, δείξε [start – end]
+    if (Number.isInteger(binWidth)) {
+      const end = start + binWidth - 1;
+      return `${start} – ${end}`;
+    }
+    // αλλιώς δείξε ημι-ανοιχτό διάστημα [start, start+binWidth)
+    const end = start + binWidth;
+    return `${start.toFixed(2)} – ${end.toFixed(2)}`;
+  };
+
+  return {
     grid: commonGrid,
+tooltip: {
+  trigger: 'axis',
+  extraCssText: 'padding:4px 6px; font-size:10px; max-width:140px;',
+  formatter: (params: any) => {
+    const p = Array.isArray(params) ? params[0] : params;
+    const idx = p.dataIndex;
+    const start = bins[idx];
+    const range = formatRange(start);
+    const count = counts[idx];
+
+    return (
+      `Range: ${range}\n` +
+      `Count: ${fmtNum(count)}`
+    ).replace(/\n/g, '<br/>');
+  },
+},
+
     xAxis: {
       type: 'category',
+      data: bins,                         // πραγματικά bins
       name: 'Z-DNA Score',
       nameLocation: 'middle',
-      nameGap: 35,  // Distance of label from axis
+      nameGap: 35,
+      axisLabel: {
+        formatter: (v: any) => String(v),
+      },
     },
     yAxis: {
-      type: 'value',
-      name: 'Count',
+      type: 'log',
+      name: 'Count (log scale)',
       nameLocation: 'middle',
-      nameGap: 45,  // Distance of label from axis
+      nameGap: 60,
+      minorTick: { show: false },
+      minorSplitLine: { show: false },
     },
     series: [{
       type: 'bar',
-      data: hist.map(d => Number(d.n)),
+      data: counts,
       itemStyle: {
-        color: CHART_COLORS.histogram
-      }
+        color: CHART_COLORS.histogram,
+      },
     }],
-  }), [hist]);
+  };
+}, [hist]);
+
+  /* -------------------------------- Histogram -------------------------------- */
+  useEffect(() => {
+    if (!species || !rows.length) { setHist([]); return; }
+    let dead = false;
+    (async () => {
+      try {
+        let where: string;
+        if (lockedAssembly) {
+          where = `assembly = ${q(lockedAssembly)}`;
+        } else {
+          where = `assembly IN (SELECT assembly FROM metadata WHERE tax_name = ${q(species)})`;
+        }
+        
+        // Get actual min/max values
+        const minMaxSql = `
+          SELECT 
+            MIN("Z-DNA Score") as min_score,
+            MAX("Z-DNA Score") as max_score
+          FROM data
+          WHERE ${where}
+        `;
+        const [minMaxResult] = await runSQL<{min_score: number, max_score: number}>(minMaxSql);
+        const minScore = Math.floor(minMaxResult.min_score);
+        const maxScore = Math.ceil(minMaxResult.max_score);
+        const binWidth = Math.max(1, Math.ceil((maxScore - minScore) / 80)); // ~80 bins
+        
+        const sql = `
+          SELECT 
+            CAST(("Z-DNA Score" - ${minScore}) / ${binWidth} AS INTEGER) * ${binWidth} + ${minScore} AS bucket,
+            COUNT(*) AS n
+          FROM data
+          WHERE ${where}
+          GROUP BY bucket
+          ORDER BY bucket
+        `;
+        const histData = await runSQL<{ bucket: number; n: number }>(sql);
+        if (!dead) setHist(histData.map(d => ({ bin: Number(getVal(d, 'bucket')), n: Number(getVal(d, 'n')) })));
+      } catch (e) {
+        console.error('Histogram error:', e);
+        if (!dead) setHist([]);
+      }
+    })();
+    return () => { dead = true; };
+  }, [species, lockedAssembly, rows.length]);
 
   // 2. Density
   const densityOpt = useMemo(() => {
@@ -649,7 +747,7 @@ export default function Explorer() {
         type: 'value',
         name: 'Sites / 100kb',
         nameLocation: 'middle',
-        nameGap: 45
+        nameGap: 60
       },
       series: [{
         type: 'bar',
@@ -677,7 +775,7 @@ export default function Explorer() {
         type: 'value',
         name: 'Z-DNA Score',
         nameLocation: 'middle',
-        nameGap: 45
+        nameGap: 60
       },
       series: [{
         type: 'scatter',
@@ -705,27 +803,35 @@ export default function Explorer() {
   */
   const boxOpt = useMemo(() => {
     if (!boxRows.length) return null;
+    
+    // Apply natural sort to chromosome names
+    const sortedBoxRows = [...boxRows].sort((a, b) => naturalSort(a.chr, b.chr));
+    
     return {
       grid: {
         ...commonGrid,
-        bottom: '15%'  // Extra space for rotated labels
+        bottom: '20%'  // More space for rotated labels
       },
       xAxis: {
         type: 'category',
+        data: sortedBoxRows.map(b => b.chr),
         name: 'Chromosome',
         nameLocation: 'middle',
-        nameGap: 45,
-        axisLabel: { rotate: 45 }
+        nameGap: 70,
+        axisLabel: { 
+          rotate: 45,
+          interval: 0  // Show all labels
+        }
       },
       yAxis: {
         type: 'value',
         name: 'Z-DNA Score',
         nameLocation: 'middle',
-        nameGap: 45
+        nameGap: 60
       },
       series: [{
         type: 'boxplot',
-        data: boxRows.map(b => [b.min, b.q1, b.median, b.q3, b.max]),
+        data: sortedBoxRows.map(b => [b.min, b.q1, b.median, b.q3, b.max]),
         itemStyle: {
           color: CHART_COLORS.boxplot,
           borderColor: CHART_COLORS.boxplot
@@ -784,7 +890,7 @@ export default function Explorer() {
         type: 'value',
         name: 'Z-DNA Score',
         nameLocation: 'middle',
-        nameGap: 45
+        nameGap: 60
       },
       series: [{
         type: 'scatter',
@@ -1110,7 +1216,7 @@ export default function Explorer() {
         )}
       </Grid>
       <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Z-DNA Score — per Chromosome (top 15 by median)</Typography>
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Z-DNA Score — per Chromosome (top by median)</Typography>
         {boxOpt ? (
           <FullWidthChart option={boxOpt} height={400} deps={[tab, boxOpt]} />
         ) : (
@@ -1145,3 +1251,31 @@ export default function Explorer() {
     </Box>
   );
 }
+
+function naturalSort(a: string, b: string) {
+    // Split strings into text and number parts
+    const reA = /[^\d]+|\d+/g;
+    const partsA = a.match(reA) || [];
+    const partsB = b.match(reA) || [];
+    
+    for (let i = 0; i < Math.min(partsA.length, partsB.length); i++) {
+        const partA = partsA[i];
+        const partB = partsB[i];
+        
+        // Check if both parts are numeric
+        const numA = parseInt(partA, 10);
+        const numB = parseInt(partB, 10);
+        
+        if (!isNaN(numA) && !isNaN(numB)) {
+            // Compare as numbers
+            if (numA !== numB) return numA - numB;
+        } else {
+            // Compare as strings
+            if (partA !== partB) return partA.localeCompare(partB);
+        }
+    }
+    
+    return partsA.length - partsB.length;
+}
+
+
