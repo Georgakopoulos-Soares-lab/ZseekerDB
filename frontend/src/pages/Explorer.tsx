@@ -732,8 +732,16 @@ tooltip: {
   }, [species, lockedAssembly, rows.length]);
 
   // 2. Density
-  const densityOpt = useMemo(() => {
-    if (!density.length) return null;
+ const densityOpt = useMemo(() => {
+  if (!density.length) return null;
+
+  const singleBin = density.length === 1;
+
+  if (singleBin) {
+    const d = density[0];
+    // κέντρο του bin: start + 50.000
+    const x = d.start + 50_000;
+
     return {
       grid: commonGrid,
       xAxis: {
@@ -741,23 +749,50 @@ tooltip: {
         name: 'Position',
         nameLocation: 'middle',
         nameGap: 35,
-        axisLabel: { formatter: (v: number) => fmtNum(v) }
+        min: 0,                // από 0 μέχρι λίγο πέρα από το bin
+        max: x * 2 || 100_000, // fallback
+        axisLabel: { formatter: (v: number) => fmtNum(v) },
       },
       yAxis: {
         type: 'value',
         name: 'Sites / 100kb',
         nameLocation: 'middle',
-        nameGap: 60
+        nameGap: 60,
       },
       series: [{
-        type: 'bar',
-        data: density.map(d => [d.start, d.n]),
-        itemStyle: {
-          color: CHART_COLORS.density
-        }
+        type: 'scatter',
+        symbolSize: 20,
+        data: [[x, d.n]],
+        itemStyle: { color: CHART_COLORS.density },
       }],
     };
-  }, [density]);
+  }
+
+  // κανονική περίπτωση: >1 bin, κρατάμε τα bars
+  return {
+    grid: commonGrid,
+    xAxis: {
+      type: 'value',
+      name: 'Position',
+      nameLocation: 'middle',
+      nameGap: 35,
+      axisLabel: { formatter: (v: number) => fmtNum(v) },
+    },
+    yAxis: {
+      type: 'value',
+      name: 'Sites / 100kb',
+      nameLocation: 'middle',
+      nameGap: 60,
+    },
+    series: [{
+      type: 'bar',
+      data: density.map(d => [d.start, d.n]),
+      itemStyle: {
+        color: CHART_COLORS.density,
+      },
+    }],
+  };
+}, [density]);
 
   // 3. Scatter
   const scatterOpt = useMemo(() => {

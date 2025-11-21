@@ -169,39 +169,47 @@ export default function HomeInsights() {
     }]
   }), [topK, skColorMap]);
 
-  const histOpt = useMemo(() => ({
-    tooltip: { trigger: 'axis', formatter: (p: any) => `${p[0]?.axisValue}: ${fmtNum(p[0]?.value ?? null)}` },
-    grid: { 
-      left: 80,
-      right: 20,
-      top: 30,
-      bottom: 80,
-      containLabel: true
-    },
-    xAxis: { 
-      type: 'category', 
-      name: 'Score bin',
-      nameLocation: 'middle',
-      nameGap: 50,
-      data: hist.map(d => d.bin),
-      axisLabel: {
-        margin: 14,
-        rotate: 45,
-        formatter: (v: any) => String(v) // keep bin labels as integers
-      }
-    },
-    yAxis: { 
-      type: 'value', 
-      name: 'Count',
-      nameLocation: 'middle',
-      nameGap: 70,
-      axisLabel: { formatter: (v: any) => fmtNum(Number(v)) }
-    },
-    series: [{ 
-      type: 'bar', 
-      data: hist.map(d => d.n) 
-    }]
-  }), [hist]);
+const histOpt = useMemo(() => ({
+  tooltip: {
+    trigger: 'axis',
+    formatter: (p: any) => `${p[0]?.axisValue}: ${fmtNum(p[0]?.value ?? null)}`
+  },
+  grid: { 
+    left: 80,
+    right: 20,
+    top: 30,
+    bottom: 80,
+    containLabel: true
+  },
+  xAxis: { 
+    type: 'category', 
+    name: 'Score bin',
+    nameLocation: 'middle',
+    nameGap: 50,
+    data: hist.map(d => d.bin),
+    axisLabel: {
+      margin: 14,
+      rotate: 45,
+      formatter: (v: any) => String(v)
+    }
+  },
+  yAxis: { 
+    type: 'log',          // 🔴 από 'value' σε 'log'
+    logBase: 10,          // προαιρετικό, για log10
+    min: 1,               // προαιρετικό, για να αποφύγουμε προβλήματα με 0
+    name: 'Count (log)',
+    nameLocation: 'middle',
+    nameGap: 70,
+    axisLabel: {
+      // εμφανίζει τα πραγματικά counts (1, 10, 100, 1000, ...)
+      formatter: (v: any) => fmtInt(Number(v))
+    }
+  },
+  series: [{
+    type: 'bar',
+    data: hist.map(d => d.n)
+  }]
+}), [hist]);
 
   const scatterOpt = useMemo(() => {
     const bySK = new Map<string, [number,number][]>();
@@ -220,12 +228,14 @@ export default function HomeInsights() {
         containLabel: true
       },
       xAxis: { 
-        type: 'value', 
-        name: 'Genome size',
+        type: 'log',         // 🔴 ΑΛΛΑΓΗ: λογαριθμική κλίμακα
+        logBase: 10,         // log10 scale
+        min: 1,              // προαιρετικό — αποφυγή προβλήματος με τιμές 0
+        name: 'Genome size (log)',
         nameLocation: 'middle',
         nameGap: 100,
         axisLabel: { 
-          formatter: (v: number) => fmtInt(Number(v)),
+          formatter: (v: number) => fmtInt(Number(v)), 
           margin: 20,
           rotate: 45,
           align: 'right'
