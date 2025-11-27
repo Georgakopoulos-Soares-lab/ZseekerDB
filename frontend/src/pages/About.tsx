@@ -105,49 +105,28 @@ const AboutDoc: FC = () => {
                 <PersonCard
                   name="Ilias Georgakopoulos-Soares"
                   role="Project lead"
-                  email="ilias@placeholder.edu"
+                  email="ilias@austin.utexas.edu"
                 />
               </Grid>
               <Grid item xs={12} sm={6} md={4}>
                 <PersonCard
                   name="Karen M. Vasquez"
                   role="Co-principal investigator"
-                  email="karen.vasquez@placeholder.edu"
-                />
-              </Grid>
-              <Grid item xs={12} sm={6} md={4}>
-                <PersonCard
-                  name="Guliang Wang"
-                  role="Co-principal investigator"
-                  email="guliang.wang@placeholder.edu"
+                  email="karen.vasquez@austin.utexas.edu"
                 />
               </Grid>
               <Grid item xs={12} sm={6} md={4}>
                 <PersonCard
                   name="Spyros Zaranikas"
                   role="Full-stack development, data engineering"
-                  email="spyros.zaranikas@placeholder.edu"
-                />
-              </Grid>
-              <Grid item xs={12} sm={6} md={4}>
-                <PersonCard
-                  name="Kimonas Provatas"
-                  role="Backend engineering, data pipelines"
-                  email="kimonas.provatas@placeholder.edu"
+                  email="s.zaranikas@gmail.com"
                 />
               </Grid>
               <Grid item xs={12} sm={6} md={4}>
                 <PersonCard
                   name="George Megalovasilis"
-                  role="Frontend engineering, visualization"
-                  email="george.megalovasilis@placeholder.edu"
-                />
-              </Grid>
-              <Grid item xs={12} sm={6} md={4}>
-                <PersonCard
-                  name="Michail Patsakis"
-                  role="Computational genomics, benchmarking"
-                  email="michail.patsakis@placeholder.edu"
+                  role="Data curator, bioinformatics"
+                  email="gm35588@my.utexas.edu"
                 />
               </Grid>
             </Grid>
@@ -166,7 +145,7 @@ const AboutDoc: FC = () => {
         <Grid item xs={12} md={6}>
           <Card title="Contact">
             <Typography>
-              General inquiries: <MuiLink href="mailto:info@placeholder.org">info@placeholder.org</MuiLink><br />
+              General inquiries: <MuiLink href="mailto:ilias@austin.utexas.edu">ilias@austin.utexas.edu</MuiLink><br />
               Project website: <MuiLink href="https://zseekerdb.com" rel="noopener">zseekerdb.com</MuiLink>
             </Typography>
           </Card>

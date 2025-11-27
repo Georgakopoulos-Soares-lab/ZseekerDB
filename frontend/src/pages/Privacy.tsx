@@ -54,12 +54,6 @@ const Privacy: FC = () => {
         <Typography variant="h5" fontWeight={700}>
           Privacy Policy
         </Typography>
-        <Stack direction="row" spacing={2}>
-          <MuiLink href="/" underline="hover">Home</MuiLink>
-          <MuiLink href="/about" underline="hover">About</MuiLink>
-          <MuiLink href="/downloads" underline="hover">Downloads</MuiLink>
-          <MuiLink href="/api" underline="hover">API</MuiLink>
-        </Stack>
       </Stack>
 
       <Section title="Overview">

@@ -197,7 +197,8 @@ func (s *Server) metadataList(c *gin.Context) {
 	// Build SELECT with proper aliases
 	selectList := buildMetadataSelect()
 
-	sortCol := cols[0]
+	//sortCol := cols[0]
+	sortCol := "tax_name"
 	if reqSort != "" {
 		for _, cName := range cols {
 			if strings.EqualFold(cName, reqSort) {
@@ -206,10 +207,18 @@ func (s *Server) metadataList(c *gin.Context) {
 			}
 		}
 	}
-	orderBy := fmt.Sprintf(" ORDER BY %s %s", quoteIdent(sortCol), dir)
+	// orderBy := fmt.Sprintf(" ORDER BY %s %s", quoteIdent(sortCol), dir)
+	orderBy := ""
+	if sortCol == "tax_name" {
+		orderBy = fmt.Sprintf(" ORDER BY LOWER(REPLACE(REPLACE(REPLACE(%s, '''', ''), '[', ''), ']', '')) %s", quoteIdent(sortCol), dir)
+	} else {
+		orderBy = fmt.Sprintf(" ORDER BY %s %s", quoteIdent(sortCol), dir)
+	}
 
-	whereParts := []string{}
+	// Always enforce genome_size >= 1000
+	whereParts := []string{metadataBaseFilter}
 	args := []any{}
+
 	if q := strings.TrimSpace(c.Query("q")); q != "" {
 		ors := make([]string, 0, len(cols))
 		for _, col := range cols {
@@ -326,8 +335,9 @@ func (s *Server) metadataExport(c *gin.Context) {
 	}
 	orderBy := fmt.Sprintf(" ORDER BY %s %s", quoteIdent(sortCol), dir)
 
-	where := ""
+	whereParts := []string{metadataBaseFilter}
 	var args []any
+
 	if q := strings.TrimSpace(c.Query("q")); q != "" {
 		maxCols := 10
 		if len(cols) < maxCols {
@@ -335,11 +345,20 @@ func (s *Server) metadataExport(c *gin.Context) {
 		}
 		ors := make([]string, 0, maxCols)
 		for i := 0; i < maxCols; i++ {
-			ors = append(ors, fmt.Sprintf("LOWER(CAST(%s AS VARCHAR)) LIKE '%%' || LOWER(?) || '%%'", quoteIdent(cols[i])))
+			ors = append(ors,
+				fmt.Sprintf("LOWER(CAST(%s AS VARCHAR)) LIKE '%%' || LOWER(?) || '%%'",
+					quoteIdent(cols[i])),
+			)
 			args = append(args, q)
 		}
-		where = " WHERE " + strings.Join(ors, " OR ")
+		whereParts = append(whereParts, "("+strings.Join(ors, " OR ")+")")
 	}
+
+	where := ""
+	if len(whereParts) > 0 {
+		where = " WHERE " + strings.Join(whereParts, " AND ")
+	}
+
 	lim := 50000
 	if s := strings.TrimSpace(c.Query("limit")); s != "" {
 		if strings.EqualFold(s, "all") {
@@ -414,10 +433,15 @@ func (s *Server) metadataTopClasses(c *gin.Context) {
 	}
 
 	q := fmt.Sprintf(`SELECT %s AS name, COUNT(*) AS value
-                      FROM metadata
-                      GROUP BY 1
-                      ORDER BY value DESC NULLS LAST
-                      LIMIT ?`, quoteIdent(col))
+					FROM metadata
+					WHERE %s
+					GROUP BY 1
+					ORDER BY value DESC NULLS LAST
+					LIMIT ?`,
+		quoteIdent(col),
+		metadataBaseFilter,
+	)
+
 	rows, err := s.db.Query(q, limit)
 	if err != nil {
 		log.Println("metadataTopClasses query error:", err)
@@ -462,8 +486,9 @@ func (s *Server) metadataDistinct(c *gin.Context) {
 		return
 	}
 
-	whereParts := []string{}
+	whereParts := []string{metadataBaseFilter}
 	args := []any{}
+
 	ciEq := func(col string) string { return fmt.Sprintf("LOWER(%s) = LOWER(?)", quoteIdent(col)) }
 	maybe := func(name string) {
 		v := strings.TrimSpace(c.Query(name))
@@ -877,6 +902,9 @@ func runSQL(s *Server, c *gin.Context, stmt string) {
 	c.JSON(http.StatusOK, gin.H{"data": data})
 }
 
+// Global base filter for all metadata queries
+const metadataBaseFilter = "genome_size >= 1000"
+
 // Metadata column configuration
 type metadataColumn struct {
 	DbName string // Database column name
@@ -1006,7 +1034,12 @@ func main() {
 	// quick previews
 	r.GET("/api/metadata/preview", func(c *gin.Context) {
 		selectList := buildMetadataSelect()
-		rows, err := s.db.Query("SELECT " + selectList + " FROM metadata LIMIT 100")
+		rows, err := s.db.Query(
+			"SELECT " + selectList +
+				" FROM metadata WHERE " + metadataBaseFilter +
+				" LIMIT 100",
+		)
+
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

@@ -16,6 +16,7 @@ import {
   TextField,
   Tooltip,
   Typography,
+  useTheme,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import DownloadIcon from '@mui/icons-material/Download';
@@ -158,6 +159,15 @@ function downloadBlob(content: BlobPart | BlobPart[], filename: string, type: st
 const speciesSearchCache = new Map<string, KV[]>();
 
 export default function Explorer() {
+
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
+  const axisLabelColor = isDark ? '#ffffff' : '#666666';
+  const axisNameColor  = isDark ? '#ffffff' : '#333333';
+
+  const tooltipBg      = isDark ? 'rgba(0,0,0,0.85)' : '#ffffff';
+  const tooltipText    = isDark ? '#ffffff' : '#000000';
+
   const [searchParams] = useSearchParams();
   const lockedAssemblyFromURL = searchParams.get('assembly');
 
@@ -255,7 +265,7 @@ export default function Explorer() {
     sql = `
       SELECT DISTINCT tax_name AS label 
       FROM metadata 
-      WHERE lower(tax_name) LIKE ${q(prefix.toLowerCase() + '%')} 
+      WHERE genome_size >= 1000 AND lower(tax_name) LIKE ${q(prefix.toLowerCase() + '%')} 
       ORDER BY 1 
       LIMIT ${AUTOCOMPLETE_LIMIT}
     `;
@@ -309,7 +319,7 @@ export default function Explorer() {
         if (lockedAssembly) {
           where = `assembly = ${q(lockedAssembly)}`;
         } else {
-          where = `assembly IN (SELECT assembly FROM metadata WHERE tax_name = ${q(species!)})`;
+          where = `assembly IN (SELECT assembly FROM metadata WHERE genome_size >= 1000 AND tax_name = ${q(species!)})`;
         }
 
         const andPrefix = prefix ? `AND lower("Chromosome") LIKE ${q(prefix + '%')}` : '';
@@ -337,7 +347,7 @@ export default function Explorer() {
     const parts: string[] = [];
     if (!species && !lockedAssembly) return '1=0';
 
-    if (species)        parts.push(`assembly IN (SELECT assembly FROM metadata WHERE tax_name = ${q(species)})`);
+    if (species)        parts.push(`assembly IN (SELECT assembly FROM metadata WHERE genome_size >= 1000 AND tax_name = ${q(species)})`);
     if (lockedAssembly) parts.push(`assembly = ${q(lockedAssembly)}`);
 
     if (chr) parts.push(`"Chromosome" = ${q(chr)}`);
@@ -609,336 +619,368 @@ export default function Explorer() {
     scatter: '#ff6b81'         // Pink
   };
 
-// 1. Histogram
 
-const histOpt = useMemo(() => {
-  const bins   = hist.map(d => Number(d.bin));
-  const counts = hist.map(d => Number(d.n));
-
-  // Εκτίμηση πλάτους bin από τα ίδια τα δεδομένα
-  let binWidth = 1;
-  if (bins.length > 1) {
-    const diffs: number[] = [];
-    for (let i = 1; i < bins.length; i++) {
-      const diff = bins[i] - bins[i - 1];
-      if (diff > 0) diffs.push(diff);
-    }
-    if (diffs.length) {
-      binWidth = Math.min(...diffs);
-    }
-  }
-
-  const formatRange = (start: number) => {
-    // αν το binWidth είναι «ωραίο» ακέραιο, δείξε [start – end]
-    if (Number.isInteger(binWidth)) {
-      const end = start + binWidth - 1;
-      return `${start} – ${end}`;
-    }
-    // αλλιώς δείξε ημι-ανοιχτό διάστημα [start, start+binWidth)
-    const end = start + binWidth;
-    return `${start.toFixed(2)} – ${end.toFixed(2)}`;
-  };
-
-  return {
-    grid: commonGrid,
-tooltip: {
-  trigger: 'axis',
-  extraCssText: 'padding:4px 6px; font-size:10px; max-width:140px;',
-  formatter: (params: any) => {
-    const p = Array.isArray(params) ? params[0] : params;
-    const idx = p.dataIndex;
-    const start = bins[idx];
-    const range = formatRange(start);
-    const count = counts[idx];
-
-    return (
-      `Range: ${range}\n` +
-      `Count: ${fmtNum(count)}`
-    ).replace(/\n/g, '<br/>');
-  },
-},
-
-    xAxis: {
-      type: 'category',
-      data: bins,                         // πραγματικά bins
-      name: 'Z-DNA Score',
-      nameLocation: 'middle',
-      nameGap: 35,
-      axisLabel: {
-        formatter: (v: any) => String(v),
+  const baseTooltip = useMemo(
+    () => ({
+      backgroundColor: tooltipBg,
+      textStyle: {
+        fontSize: 11,
+        color: tooltipText,
       },
-    },
-    yAxis: {
-      type: 'log',
-      name: 'Count (log scale)',
-      nameLocation: 'middle',
-      nameGap: 60,
-      minorTick: { show: false },
-      minorSplitLine: { show: false },
-    },
-    series: [{
-      type: 'bar',
-      data: counts,
-      itemStyle: {
-        color: CHART_COLORS.histogram,
+      padding: [6, 8],
+      confine: true,
+    }),
+    [tooltipBg, tooltipText]
+  );
+
+  // 1. Histogram (Z-DNA Score)
+  const histOpt = useMemo(
+    () => ({
+      grid: commonGrid,
+      tooltip: {
+        ...baseTooltip,
+        trigger: 'item', // στενό tooltip, όχι axis-wide
+        axisPointer: { type: 'none' },
+        formatter: (p: any) => `${p.name}: ${fmtNum(p.value)}`,
+        extraCssText: 'max-width: 140px; white-space: nowrap;',
       },
-    }],
-  };
-}, [hist]);
+      xAxis: {
+        type: 'category',
+        data: hist.map((d) => d.bin),
+        name: 'Score',
+        nameLocation: 'middle',
+        nameGap: 35,
+        nameTextStyle: { color: axisNameColor },
+        axisLabel: {
+          formatter: (v: any) => String(v),
+          color: axisLabelColor,
+        },
+      },
+      yAxis: {
+        type: 'log',
+        logBase: 10,
+        name: 'Counts (log{sub|10})',
+        nameTextStyle: {
+          color: axisNameColor,
+          rich: {
+            sub: {
+              color: axisNameColor,
+              fontSize: 7,
+              verticalAlign: 'bottom',
+              padding: [6, 0, 0, 0],
+            },
+          },
+        },
+        nameLocation: 'middle',
+        nameGap: 60,
+        minorTick: { show: false },
+        minorSplitLine: { show: false },
+        axisLabel: {
+          color: axisLabelColor,
+        },
+      },
+      series: [
+        {
+          type: 'bar',
+          data: hist.map((d) => d.n),
+          itemStyle: {
+            color: CHART_COLORS.histogram,
+          },
+        },
+      ],
+    }),
+    [hist, baseTooltip, axisLabelColor, axisNameColor]
+  );
 
-  /* -------------------------------- Histogram -------------------------------- */
-  useEffect(() => {
-    if (!species || !rows.length) { setHist([]); return; }
-    let dead = false;
-    (async () => {
-      try {
-        let where: string;
-        if (lockedAssembly) {
-          where = `assembly = ${q(lockedAssembly)}`;
-        } else {
-          where = `assembly IN (SELECT assembly FROM metadata WHERE tax_name = ${q(species)})`;
-        }
-        
-        // Get actual min/max values
-        const minMaxSql = `
-          SELECT 
-            MIN("Z-DNA Score") as min_score,
-            MAX("Z-DNA Score") as max_score
-          FROM data
-          WHERE ${where}
-        `;
-        const [minMaxResult] = await runSQL<{min_score: number, max_score: number}>(minMaxSql);
-        const minScore = Math.floor(minMaxResult.min_score);
-        const maxScore = Math.ceil(minMaxResult.max_score);
-        const binWidth = Math.max(1, Math.ceil((maxScore - minScore) / 80)); // ~80 bins
-        
-        const sql = `
-          SELECT 
-            CAST(("Z-DNA Score" - ${minScore}) / ${binWidth} AS INTEGER) * ${binWidth} + ${minScore} AS bucket,
-            COUNT(*) AS n
-          FROM data
-          WHERE ${where}
-          GROUP BY bucket
-          ORDER BY bucket
-        `;
-        const histData = await runSQL<{ bucket: number; n: number }>(sql);
-        if (!dead) setHist(histData.map(d => ({ bin: Number(getVal(d, 'bucket')), n: Number(getVal(d, 'n')) })));
-      } catch (e) {
-        console.error('Histogram error:', e);
-        if (!dead) setHist([]);
-      }
-    })();
-    return () => { dead = true; };
-  }, [species, lockedAssembly, rows.length]);
+  // 2. Density (Sites / 100kb)
+  const densityOpt = useMemo(() => {
+    if (!density.length) return null;
 
-  // 2. Density
- const densityOpt = useMemo(() => {
-  if (!density.length) return null;
+    const singleBin = density.length === 1;
 
-  const singleBin = density.length === 1;
+    if (singleBin) {
+      const d = density[0];
+      const x = d.start + 50_000;
 
-  if (singleBin) {
-    const d = density[0];
-    // κέντρο του bin: start + 50.000
-    const x = d.start + 50_000;
+      return {
+        grid: commonGrid,
+        tooltip: {
+          ...baseTooltip,
+          trigger: 'axis',
+          extraCssText: 'max-width: 140px; white-space: nowrap;',
+          formatter: (p: any) =>
+            `Position: ${fmtNum(p.value[0])}\nSites / 100kb: ${fmtNum(
+              p.value[1]
+            )}`,
+        },
+        xAxis: {
+          type: 'value',
+          name: 'Position',
+          nameLocation: 'middle',
+          nameGap: 35,
+          min: 0,
+          max: x * 2 || 100_000,
+          nameTextStyle: { color: axisNameColor },
+          axisLabel: {
+            formatter: (v: number) => fmtNum(v),
+            color: axisLabelColor,
+          },
+        },
+        yAxis: {
+          type: 'value',
+          name: 'Sites / 100kb',
+          nameLocation: 'middle',
+          nameGap: 60,
+          nameTextStyle: { color: axisNameColor },
+          axisLabel: { color: axisLabelColor },
+        },
+        series: [
+          {
+            type: 'scatter',
+            symbolSize: 20,
+            data: [[x, d.n]],
+            itemStyle: { color: CHART_COLORS.density },
+          },
+        ],
+      };
+    }
 
+    // >1 bin → bars
     return {
       grid: commonGrid,
+      tooltip: {
+        ...baseTooltip,
+        trigger: 'axis',
+        extraCssText: 'max-width: 140px; white-space: nowrap;',
+        formatter: (p: any) =>
+          `${fmtNum(p[0].value[0])}: ${fmtNum(p[0].value[1])}`,
+      },
       xAxis: {
         type: 'value',
         name: 'Position',
         nameLocation: 'middle',
         nameGap: 35,
-        min: 0,                // από 0 μέχρι λίγο πέρα από το bin
-        max: x * 2 || 100_000, // fallback
-        axisLabel: { formatter: (v: number) => fmtNum(v) },
+        nameTextStyle: { color: axisNameColor },
+        axisLabel: {
+          formatter: (v: number) => fmtNum(v),
+          color: axisLabelColor,
+        },
       },
       yAxis: {
         type: 'value',
         name: 'Sites / 100kb',
         nameLocation: 'middle',
         nameGap: 60,
+        nameTextStyle: { color: axisNameColor },
+        axisLabel: { color: axisLabelColor },
       },
-      series: [{
-        type: 'scatter',
-        symbolSize: 20,
-        data: [[x, d.n]],
-        itemStyle: { color: CHART_COLORS.density },
-      }],
+      series: [
+        {
+          type: 'bar',
+          data: density.map((d) => [d.start, d.n]),
+          itemStyle: {
+            color: CHART_COLORS.density,
+          },
+        },
+      ],
     };
-  }
+  }, [density, baseTooltip, axisLabelColor, axisNameColor]);
 
-  // κανονική περίπτωση: >1 bin, κρατάμε τα bars
-  return {
-    grid: commonGrid,
-    xAxis: {
-      type: 'value',
-      name: 'Position',
-      nameLocation: 'middle',
-      nameGap: 35,
-      axisLabel: { formatter: (v: number) => fmtNum(v) },
-    },
-    yAxis: {
-      type: 'value',
-      name: 'Sites / 100kb',
-      nameLocation: 'middle',
-      nameGap: 60,
-    },
-    series: [{
-      type: 'bar',
-      data: density.map(d => [d.start, d.n]),
-      itemStyle: {
-        color: CHART_COLORS.density,
-      },
-    }],
-  };
-}, [density]);
-
-  // 3. Scatter
+  // 3. Scatter: Z-DNA Score across genomic positions (per chr)
   const scatterOpt = useMemo(() => {
     if (!scatter.length) return null;
     return {
       grid: commonGrid,
+      tooltip: {
+        ...baseTooltip,
+        trigger: 'axis',
+        extraCssText: 'max-width: 140px; white-space: nowrap;',
+        formatter: (p: any) =>
+          `Start: ${fmtNum(p.value[0])}\nScore: ${p.value[1].toFixed(2)}`,
+      },
       xAxis: {
         type: 'value',
         name: 'Start Position',
         nameLocation: 'middle',
         nameGap: 35,
-        axisLabel: { formatter: (v: number) => fmtNum(v) }
+        nameTextStyle: { color: axisNameColor },
+        axisLabel: {
+          formatter: (v: number) => fmtNum(v),
+          color: axisLabelColor,
+        },
       },
       yAxis: {
         type: 'value',
         name: 'Z-DNA Score',
         nameLocation: 'middle',
-        nameGap: 60
+        nameGap: 60,
+        nameTextStyle: { color: axisNameColor },
+        axisLabel: { color: axisLabelColor },
       },
-      series: [{
-        type: 'scatter',
-        symbolSize: 5,
-        data: scatter.map(d => [d.x, d.y]),
-        itemStyle: {
-          color: CHART_COLORS.scatter
-        }
-      }],
+      series: [
+        {
+          type: 'scatter',
+          symbolSize: 5,
+          data: scatter.map((d) => [d.x, d.y]),
+          itemStyle: {
+            color: CHART_COLORS.scatter,
+          },
+        },
+      ],
     };
-  }, [scatter]);
+  }, [scatter, baseTooltip, axisLabelColor, axisNameColor]);
 
-  /*
-  const kmerOpt = useMemo(() => {
-    const x = kmers.map(k => k.motif);
-    const y = kmers.map(k => k.n);
-    return {
-      tooltip: { trigger: 'axis' },
-      xAxis: { type: 'category', data: x, axisLabel: { rotate: 45 } },
-      yAxis: { type: 'value', name: 'Count' },
-      series: [{ type: 'bar', data: y }],
-      grid: { left: 50, right: 20, top: 30, bottom: 80 },
-    };
-  }, [kmers]);
-  */
+  // 4. Boxplot: Z-DNA Score ανά χρωμόσωμα
   const boxOpt = useMemo(() => {
     if (!boxRows.length) return null;
-    
-    // Apply natural sort to chromosome names
-    const sortedBoxRows = [...boxRows].sort((a, b) => naturalSort(a.chr, b.chr));
-    
+
+    const sortedBoxRows = [...boxRows].sort((a, b) =>
+      naturalSort(a.chr, b.chr)
+    );
+
     return {
       grid: {
         ...commonGrid,
-        bottom: '20%'  // More space for rotated labels
+        bottom: '20%', // extra space for rotated labels
+      },
+      tooltip: {
+        ...baseTooltip,
+        trigger: 'axis',
+        extraCssText: 'max-width: 200px; white-space: nowrap;',
       },
       xAxis: {
         type: 'category',
-        data: sortedBoxRows.map(b => b.chr),
+        data: sortedBoxRows.map((b) => b.chr),
         name: 'Chromosome',
         nameLocation: 'middle',
         nameGap: 70,
-        axisLabel: { 
+        nameTextStyle: { color: axisNameColor },
+        axisLabel: {
           rotate: 45,
-          interval: 0  // Show all labels
-        }
+          interval: 0,
+          color: axisLabelColor,
+        },
       },
       yAxis: {
         type: 'value',
         name: 'Z-DNA Score',
         nameLocation: 'middle',
-        nameGap: 60
+        nameGap: 60,
+        nameTextStyle: { color: axisNameColor },
+        axisLabel: { color: axisLabelColor },
       },
-      series: [{
-        type: 'boxplot',
-        data: sortedBoxRows.map(b => [b.min, b.q1, b.median, b.q3, b.max]),
-        itemStyle: {
-          color: CHART_COLORS.boxplot,
-          borderColor: CHART_COLORS.boxplot
-        }
-      }],
+      series: [
+        {
+          type: 'boxplot',
+          data: sortedBoxRows.map((b) => [
+            b.min,
+            b.q1,
+            b.median,
+            b.q3,
+            b.max,
+          ]),
+          itemStyle: {
+            color: CHART_COLORS.boxplot,
+            borderColor: CHART_COLORS.boxplot,
+          },
+        },
+      ],
     };
-  }, [boxRows]);
+  }, [boxRows, baseTooltip, axisLabelColor, axisNameColor]);
 
+  // 5. Length vs Z-DNA Score (limited sample)
   const lenScoreOpt = useMemo(() => {
     if (!lenScore.length) return null;
     return {
-      tooltip: { trigger: 'item', formatter: (p: any) => `Length: ${fmtNum(p.value[0])} bp<br/>Score: ${Number(p.value[1]).toFixed(2)}` },
+      grid: commonGrid,
+      tooltip: {
+        ...baseTooltip,
+        trigger: 'item',
+        extraCssText: 'max-width: 140px; white-space: nowrap;',
+        formatter: (p: any) =>
+          `Length: ${fmtNum(p.value[0])} bp\nScore: ${Number(
+            p.value[1]
+          ).toFixed(2)}`,
+      },
       xAxis: {
         type: 'value',
         name: 'Length (bp)',
         nameLocation: 'middle',
         nameGap: 35,
-        axisLabel: { formatter: (v: number) => fmtNum(v) }
+        nameTextStyle: { color: axisNameColor },
+        axisLabel: {
+          formatter: (v: number) => fmtNum(v),
+          color: axisLabelColor,
+        },
       },
       yAxis: {
         type: 'value',
-        name: 'Z‑DNA Score',
+        name: 'Z-DNA Score',
         nameLocation: 'middle',
-        nameGap: 45
+        nameGap: 45,
+        nameTextStyle: { color: axisNameColor },
+        axisLabel: { color: axisLabelColor },
       },
-      series: [{
-        type: 'scatter',
-        symbolSize: 5,
-        data: lenScore.map(d => [d.len, d.score]),
-        itemStyle: {
-          color: CHART_COLORS.lenScore
-        }
-      }],
-      grid: commonGrid
+      series: [
+        {
+          type: 'scatter',
+          symbolSize: 5,
+          data: lenScore.map((d) => [d.len, d.score]),
+          itemStyle: {
+            color: CHART_COLORS.lenScore,
+          },
+        },
+      ],
     };
-  }, [lenScore]);
+  }, [lenScore, baseTooltip, axisLabelColor, axisNameColor]);
 
+  // 6. Genomic distribution (random sample across genome)
   const genomicDistOpt = useMemo(() => {
     if (!genomicDist.length) return null;
     return {
+      grid: commonGrid,
       tooltip: {
+        ...baseTooltip,
         trigger: 'axis',
+        extraCssText: 'max-width: 240px; white-space: nowrap;',
         formatter: (params: any) => {
           const p = params[0];
-          return `Position: ${fmtNum(p.value[0])}<br/>Score: ${p.value[1].toFixed(2)}`;
-        }
+          return `Position: ${fmtNum(p.value[0])}\nScore: ${p.value[1].toFixed(
+            2
+          )}`;
+        },
       },
       xAxis: {
         type: 'value',
         name: 'Genomic Position (coordinate)',
         nameLocation: 'middle',
         nameGap: 35,
-        axisLabel: { formatter: (v: number) => fmtNum(v) }
+        nameTextStyle: { color: axisNameColor },
+        axisLabel: {
+          formatter: (v: number) => fmtNum(v),
+          color: axisLabelColor,
+        },
       },
       yAxis: {
         type: 'value',
         name: 'Z-DNA Score',
         nameLocation: 'middle',
-        nameGap: 60
+        nameGap: 60,
+        nameTextStyle: { color: axisNameColor },
+        axisLabel: { color: axisLabelColor },
       },
-      series: [{
-        type: 'scatter',
-        symbolSize: 8,
-        data: genomicDist.map(d => [d.pos, d.score]),
-        itemStyle: {
-          color: CHART_COLORS.genomicDist
-        }
-      }],
-      grid: commonGrid
+      series: [
+        {
+          type: 'scatter',
+          symbolSize: 8,
+          data: genomicDist.map((d) => [d.pos, d.score]),
+          itemStyle: {
+            color: CHART_COLORS.genomicDist,
+          },
+        },
+      ],
     };
-  }, [genomicDist]);
-
+  }, [genomicDist, baseTooltip, axisLabelColor, axisNameColor]);
   /* -------------------------------------- UI ------------------------------------- */
 
   const topScrollRef = useRef<HTMLDivElement>(null);

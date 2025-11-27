@@ -25,13 +25,7 @@ export type MetadataColumn = {
 // Column definitions in display order
 export const METADATA_COLUMNS: MetadataColumn[] = [
   { dbName: "assembly", label: "Assembly", hidden: false },
-  { dbName: "bioproject", label: "Bioproject", hidden: true },
-  { dbName: "biosample", label: "Biosample", hidden: true },
-  { dbName: "taxid", label: "Taxon ID", hidden: false },
-  { dbName: "assembly_level", label: "Assembly level", hidden: true },
-  { dbName: "genome_size", label: "Genome size", hidden: false },
-  { dbName: "gc_percent", label: "%GC", hidden: false },
-  { dbName: "superkingdom", label: "Superkingdom", hidden: false },
+  { dbName: "tax_name", label: "Species", hidden: false },
   { dbName: "viral_realm", label: "Viral realm", hidden: false },
   { dbName: "kingdom", label: "Kingdom", hidden: false },
   { dbName: "phylum", label: "Phylum", hidden: false },
@@ -39,12 +33,18 @@ export const METADATA_COLUMNS: MetadataColumn[] = [
   { dbName: "order", label: "Order", hidden: false },
   { dbName: "family", label: "Family", hidden: false },
   { dbName: "genus", label: "Genus", hidden: false },
-  { dbName: "tax_name", label: "Specie", hidden: false },
-  { dbName: "is_t2t", label: "Is T2T", hidden: false },
-  { dbName: "updated_tax_name", label: "Infraspecific name", hidden: false },
-  { dbName: "obs_zbp", label: " Z-DNA/-RNA bases count", hidden: false },
-  { dbName: "obs_density_per_kb", label: "Z-DNA/-RNA density per kb", hidden: false },
-  { dbName: "obs_n_zdna", label: "Z-DNA/-RNA predictions count", hidden: false },
+  { dbName: "bioproject", label: "Bioproject", hidden: true },
+  { dbName: "biosample", label: "Biosample", hidden: true },
+  { dbName: "taxid", label: "Taxon ID", hidden: true },
+  { dbName: "assembly_level", label: "Assembly level", hidden: true },
+  { dbName: "genome_size", label: "Genome size", hidden: true },
+  { dbName: "gc_percent", label: "%GC", hidden: true },
+  { dbName: "superkingdom", label: "Superkingdom", hidden: true },
+  { dbName: "is_t2t", label: "Is T2T", hidden: true },
+  { dbName: "updated_tax_name", label: "Infraspecific name", hidden: true },
+  { dbName: "obs_zbp", label: " Z-DNA/-RNA bases count", hidden: true },
+  { dbName: "obs_density_per_kb", label: "Z-DNA/-RNA density per kb", hidden: true },
+  { dbName: "obs_n_zdna", label: "Z-DNA/-RNA predictions count", hidden: true },
 ];
 
 // Create a map for quick label lookups
@@ -115,7 +115,7 @@ export default function DataTable({ rows, columns, visible, height = 480 }: Prop
         // πραγματική τιμή για filtering / sorting
         valueGetter: (params) => params.row?.[field],
         // εμφάνιση: δείξε "-" αν είναι κενό
-        valueFormatter: (params) => {
+        renderCell: (params) => {
           const v = params.value;
           return v === null || v === undefined || v === '' ? EMPTY_DISPLAY : String(v);
         },

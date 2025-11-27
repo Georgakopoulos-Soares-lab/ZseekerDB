@@ -6,6 +6,7 @@ import {
   CircularProgress,
   Grid,
 } from '@mui/material';
+import { useTheme } from '@mui/material/styles';
 import ReactECharts from 'echarts-for-react';
 
 /* =============================================================================
@@ -98,9 +99,21 @@ type TreeNode = {
   itemStyle?: { color?: string };
 };
 
+/** Βασική παλέτα superkingdoms (ίδια με home / metadata) */
+const SUPERKINGDOM_COLORS = ['#4D77A9', '#F08F2A', '#E25558', '#77B7B3'] as const;
+
 /** Κανονικοποίηση superkingdom σε 4 σταθερές κατηγορίες */
 const SK_ORDER = ['Archaea', 'Bacteria', 'Eukaryota', 'Viruses'] as const;
 type SK = typeof SK_ORDER[number];
+
+/** Σταθερό χρώμα ανά superkingdom */
+const SK_COLOR: Record<SK, string> = {
+  Archaea:  SUPERKINGDOM_COLORS[0],
+  Bacteria: SUPERKINGDOM_COLORS[1],
+  Eukaryota: SUPERKINGDOM_COLORS[2],
+  Viruses:  SUPERKINGDOM_COLORS[3],
+};
+
 
 function canonSK(s: string | null): SK | null {
   const x = (s ?? '').trim().toLowerCase();
@@ -118,13 +131,14 @@ const BLUE_PALETTE = [
 ];
 
 /** Σταθερό base χρώμα ανά superkingdom (ώστε το 1ο επίπεδο να μην “λευκίζει”) */
+/*
 const SK_COLOR: Record<SK, string> = {
   Archaea:  '#1558C4',
   Bacteria: '#1C66DF',
   Eukaryota:'#2A73F2',
   Viruses:  '#0B3C8C',
 };
-
+*/
 /* ------------------------------- UI micro components ------------------------------- */
 
 function StatCard({ title, value, sx }: { title: string; value: string; sx?: any }) {
@@ -169,6 +183,12 @@ function TopListCard({ title, items }: { title: string; items: KV[] }) {
 export default function MetadataStats() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const theme = useTheme();
+  const isDarkMode = theme.palette.mode === 'dark';
+
+  const breadcrumbBg = isDarkMode ? '#424242' : '#333333';
+  const breadcrumbText = '#FFFFFF';
 
   // Overview KPIs
   const [totalAssemblies, setTotalAssemblies] = useState<number | null>(null);
@@ -226,6 +246,7 @@ export default function MetadataStats() {
             MIN(try_cast(gc_percent  AS DOUBLE))    AS min_gc,
             MAX(try_cast(gc_percent  AS DOUBLE))    AS max_gc
           FROM metadata
+          WHERE genome_size >= 1000
         `;
         const [ov] = await fetchSql<any>(overviewSql);
 
@@ -233,6 +254,7 @@ export default function MetadataStats() {
         const superSql = `
           SELECT coalesce(superkingdom,'(unknown)') AS label, COUNT(*) AS n
           FROM metadata
+          WHERE genome_size >= 1000
           GROUP BY 1
           ORDER BY n DESC
         `;
@@ -242,7 +264,7 @@ export default function MetadataStats() {
         const topKSql = `
           SELECT kingdom AS label, COUNT(*) AS n
           FROM metadata
-          WHERE kingdom IS NOT NULL AND kingdom <> ''
+          WHERE kingdom IS NOT NULL AND kingdom <> '' AND genome_size >= 1000
           GROUP BY 1
           ORDER BY n DESC
           LIMIT 5
@@ -253,7 +275,9 @@ export default function MetadataStats() {
         const topGSql = `
           SELECT genus AS label, COUNT(*) AS n
           FROM metadata
-          WHERE genus IS NOT NULL AND genus <> '' AND genus NOT LIKE '%unclassified%'
+          WHERE genus IS NOT NULL AND genus <> '' AND 
+            genus NOT LIKE '%unclassified%' AND 
+            genome_size >= 1000
           GROUP BY 1
           ORDER BY n DESC
           LIMIT 5
@@ -264,6 +288,7 @@ export default function MetadataStats() {
         const asmSql = `
           SELECT coalesce(assembly_level,'(unknown)') AS label, COUNT(*) AS n
           FROM metadata
+          WHERE genome_size >= 1000
           GROUP BY 1
           ORDER BY n DESC
         `;
@@ -274,6 +299,7 @@ export default function MetadataStats() {
           SELECT
             superkingdom, kingdom, phylum, tax_name, COUNT(*) AS n
           FROM metadata
+          WHERE genome_size >= 1000
           GROUP BY 1,2,3,4
         `;
         const dist = await fetchSql<AggRow>(distSql);
@@ -336,18 +362,29 @@ export default function MetadataStats() {
             let pChildren: TreeNode[] = [];
             for (const [p, mT] of mP) {
               // ---- Species children (top 30 per phylum)
-              const entriesT = Array.from(mT.entries()).sort((a, b) => b[1] - a[1]).slice(0, 30);
-              const tChildren: TreeNode[] = entriesT.map(([t, cnt]) => ({ name: t, value: cnt }));
-              const pSum = entriesT.reduce((s, [, cnt]) => s + cnt, 0);
+              const entriesT = Array.from(mT.entries())
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 30);
+
+              const tChildren: TreeNode[] = entriesT.map(([t, cnt]) => {
+                const raw = Math.max(1, cnt);         // ασφάλεια να μην έχουμε 0
+                const v = Math.log10(raw);           // log10
+                return { name: t, value: v };
+              });
+
+              const pSum = tChildren.reduce((s, n) => s + n.value, 0);
               pChildren.push({ name: p, value: pSum, children: tChildren });
             }
+
             pChildren = pChildren.sort((a, b) => b.value - a.value).slice(0, 30);
             const kSum = pChildren.reduce((s, n) => s + n.value, 0);
             kChildren.push({ name: k, value: kSum, children: pChildren });
           }
+
           const kTop = kChildren.sort((a, b) => b.value - a.value).slice(0, 30);
           const skSum = kTop.reduce((s, n) => s + n.value, 0);
-          // σταθερό base μπλε ανά superkingdom
+
+          // σταθερό χρώμα από παλέτα superkingdoms
           return { name: sk, value: skSum, children: kTop, itemStyle: { color: SK_COLOR[sk] } };
         };
 
@@ -356,7 +393,7 @@ export default function MetadataStats() {
           .filter((n): n is TreeNode => !!n);
 
         // Δώσε μοναδικά χρώματα σε ΟΛΑ τα nodes (όλα τα levels)
-        colorizeTree(data);
+        // colorizeTree(data);
 
         setTreeData(data);
 
@@ -372,38 +409,138 @@ export default function MetadataStats() {
 
   const hasData = useMemo(() => !loading && !error, [loading, error]);
 
+  const avgGenomeText =
+    typeof avgGenome === 'number' && Number.isFinite(avgGenome)
+      ? avgGenome.toLocaleString('en-US', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })
+      : '—';
+
+  const minGenomeText = fmtBig(minGenome);
+  const maxGenomeText = fmtBig(maxGenome);
+
+  const avgGcText = fmtPercent(avgGC, 2);
+  const minGcText = fmtPercent(minGC, 2);
+  const maxGcText = fmtPercent(maxGC, 2);
+
   // ------------------------------ ECharts Treemap ------------------------------
 const treemapOption = useMemo(() => ({
   backgroundColor: 'transparent',
-  tooltip: { /* ... */ },
+
+  tooltip: {
+    formatter: (info: any) => {
+      const name = info.name;
+      const value = info.value;
+      return `${name}<br/>log10(count sum): ${value.toFixed(2)}`;
+    },
+  },
   series: [{
+    name: 'Superkingdoms',
     type: 'treemap',
     data: treeData,
     leafDepth: 1,
     nodeClick: 'zoomToNode',
     roam: false,
-    squareRatio: 1,
-    // ❌ Μην βάζεις color / colorMappingBy εδώ
-    breadcrumb: { /* ... */ },
-    itemStyle: { borderColor: 'transparent', borderWidth: 0.5 },
-    label: { show: true, formatter: '{b}', overflow: 'truncate', color: '#fff' },
-    upperLabel: { show: true, height: 22, color: '#fff' },
+    squareRatio: 0.9,
+    colorMappingBy: 'index',
+
+    // labels
+    label: {
+      show: true,
+      formatter: '{b}',
+      color: isDarkMode ? '#ffffff' : '#111111',   // 👈 ΔΥΝΑΜΙΚΟ ΧΡΩΜΑ
+      overflow: 'truncate',
+      fontSize: 13,
+      minFontSize: 11,
+    },
+
+    upperLabel: {
+      show: true,
+      height: 28,
+      color: isDarkMode ? '#ffffff' : '#111111',   // 👈 ΔΥΝΑΜΙΚΟ ΧΡΩΜΑ
+      formatter: '{b}',
+      textStyle: {
+        fontSize: 14,
+        fontWeight: 600,
+        color: isDarkMode ? '#ffffff' : '#111111', // 👈 ΕΠΙΠΛΕΟΝ εδώ
+      },
+    },
+
+    // Γενικό style: ΚΑΘΟΛΟΥ άσπρα borders
+    itemStyle: {
+      borderColor: 'transparent',
+      borderWidth: 0,
+    },
+
+    // 🔹 breadcrumb ΜΕΣΑ στη σειρά, ΟΧΙ μέσα στο levels[]
+    breadcrumb: {
+      show: true,
+      height: 28,
+      left: 'center',
+      bottom: 4,
+      itemStyle: {
+        color: breadcrumbBg,       // από το theme (dark / light)
+        borderColor: 'transparent',
+      },
+      textStyle: {
+        color: breadcrumbText,     // π.χ. #FFFFFF
+        fontSize: 12,
+        fontWeight: 500,
+      },
+      emphasis: {
+        itemStyle: { color: breadcrumbBg },
+        textStyle: { color: breadcrumbText },
+      },
+    },
+
+    // επίπεδα treemap
     levels: [
-      { itemStyle: { borderWidth: 0,   gapWidth: 4, borderColor: 'transparent' } },
-      { itemStyle: { borderWidth: 0.5, gapWidth: 3, borderColor: 'transparent' } },
-      { itemStyle: { borderWidth: 0.5, gapWidth: 2, borderColor: 'transparent' } },
-      { itemStyle: { borderWidth: 0.5, gapWidth: 1, borderColor: 'transparent' } },
-    ]
-  }]
-}), [treeData]);
+      {
+        // level 0: Superkingdoms
+        minArea: 4000, // δίνει αρκετό χώρο ώστε να φανούν και Eukaryota / Archaea
+        itemStyle: {
+          borderColor: 'transparent',
+          borderWidth: 0,
+          gapWidth: 4,
+        },
+        upperLabel: { show: true },
+      },
+      {
+        // level 1
+        itemStyle: {
+          borderColor: 'transparent',
+          borderWidth: 0,
+          gapWidth: 3,
+        },
+      },
+      {
+        // level 2
+        itemStyle: {
+          borderColor: 'transparent',
+          borderWidth: 0,
+          gapWidth: 2,
+        },
+      },
+      {
+        // level 3
+        itemStyle: {
+          borderColor: 'transparent',
+          borderWidth: 0,
+          gapWidth: 1,
+        },
+      },
+    ],
+  }],
+}), [treeData, breadcrumbBg, breadcrumbText]);
 
   /* -------------------------------------- UI ------------------------------------- */
 
   return (
     <Box sx={{ p: 2 }}>
       {/* Τίτλος σελίδας */}
-      <Typography variant="h4" align="center" sx={{ mb: 3, fontWeight: 700 }}>
-        ZDNA database insights
+      <Typography variant="h5" align="center" sx={{ mb: 3, fontWeight: 600 }}>
+        ZDNA-Database insights
       </Typography>
 
       {loading && (
@@ -431,65 +568,230 @@ const treemapOption = useMemo(() => ({
           <Box>
             {/* KPIs πάνω από το treemap (2 σειρές, ίσο μέγεθος) */}
             
-<Grid
-  container
-  spacing={3}
-  sx={{ mb: 4, mt: 2 }}
->
-  {[
-    { title: 'Total Assemblies', value: fmtInt(totalAssemblies) },
-    { title: 'Total Superkingdoms', value: fmtInt(totalSuperkingdoms) },
-    { title: 'Total Kingdoms', value: fmtInt(totalKingdoms) },
-    { title: 'Total Phylum', value: fmtInt(totalPhylum) },
-    { title: 'Total Classes', value: fmtInt(totalClasses) },
-    { title: 'Total Orders', value: fmtInt(totalOrders) },
-    { title: 'Total Families', value: fmtInt(totalFamilies) },
-    { title: 'Total Genus', value: fmtInt(totalGenus) },
-    { title: 'Total Species', value: fmtInt(uniqueTaxids) },
-    { title: 'Average Genome Size', value: Number(avgGenome).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) },
-    { title: 'Min Genome Size', value: fmtBig(minGenome) },
-    { title: 'Max Genome Size', value: fmtBig(maxGenome) },
-    { title: 'Average %GC', value: fmtPercent(avgGC, 2) },
-    { title: 'Min %GC', value: fmtPercent(minGC, 2) },
-    { title: 'Max %GC', value: fmtPercent(maxGC, 2) }
-  ].map((kpi) => (
-    <Grid key={kpi.title} item xs={12} sm={6} md={4} lg={3}>
-      <Paper 
-        sx={{ 
-          p: 3, 
+
+{/* KPIs πάνω από το treemap – grouped */}
+<Box sx={{ mb: 4, mt: 2, display: 'grid', rowGap: 1 }}>
+
+  {/* ======== Totals ======== */}
+  <Typography
+    variant="subtitle2"
+    sx={{
+      mb: 1,
+      textTransform: 'uppercase',
+      letterSpacing: 0.12,
+      color: 'text.secondary',
+    }}
+  >
+    Totals
+  </Typography>
+
+  <Box
+    sx={{
+      display: 'grid',
+      gridTemplateColumns: {
+        xs: 'repeat(auto-fill, minmax(120px, 1fr))',
+        sm: 'repeat(auto-fill, minmax(130px, 1fr))',
+        md: 'repeat(auto-fill, minmax(140px, 1fr))',
+      },
+      gap: 1.0,   // μικρότερο gap
+    }}
+  >
+    {[
+      { title: 'Total Assemblies', value: fmtInt(totalAssemblies) },
+      { title: 'Superkingdoms', value: fmtInt(totalSuperkingdoms) },
+      { title: 'Kingdoms', value: fmtInt(totalKingdoms) },
+      { title: 'Phylum', value: fmtInt(totalPhylum) },
+      { title: 'Classes', value: fmtInt(totalClasses) },
+      { title: 'Orders', value: fmtInt(totalOrders) },
+      { title: 'Families', value: fmtInt(totalFamilies) },
+      { title: 'Genera', value: fmtInt(totalGenus) },
+      { title: 'Species', value: fmtInt(uniqueTaxids) },
+    ].map((kpi) => (
+      <Paper
+        key={kpi.title}
+        sx={{
+          p: 1.5,
+          py: 0.3,
           textAlign: 'center',
           bgcolor: 'background.paper',
           borderRadius: 2,
-          height: '100%',
+          boxShadow: 1,
+          minHeight: 90,
           display: 'flex',
           flexDirection: 'column',
-          justifyContent: 'center'
+          justifyContent: 'center',
         }}
       >
-        <Typography 
-          variant="h4" 
-          sx={{ 
-            mb: 1,
-            fontSize: '2rem',
-            fontWeight: 500,
-            color: 'primary.main'
+        <Typography
+          variant="h6"
+          sx={{
+            mb: 0.3,
+            fontSize: '1.1rem',
+            fontWeight: 600,
+            color: 'primary.main',
+            lineHeight: 1.2,
+            whiteSpace: 'nowrap',
           }}
         >
           {kpi.value}
         </Typography>
-        <Typography 
-          variant="body1"
+        <Typography
+          variant="caption"
           sx={{
-            fontWeight: 400,
-            color: 'text.secondary'
+            color: 'text.secondary',
+            lineHeight: 1.1,
+            whiteSpace: 'nowrap',
           }}
         >
           {kpi.title}
         </Typography>
       </Paper>
-    </Grid>
-  ))}
-</Grid>
+    ))}
+  </Box>
+
+  {/* ======== Genome Size ======== */}
+  <Typography
+    variant="subtitle2"
+    sx={{
+      mt: 3,
+      mb: 1,
+      textTransform: 'uppercase',
+      letterSpacing: 0.12,
+      color: 'text.secondary',
+    }}
+  >
+    Genome Size
+  </Typography>
+
+  <Box
+    sx={{
+      display: 'grid',
+      gridTemplateColumns: {
+        xs: 'repeat(auto-fill, minmax(140px, 1fr))',
+        sm: 'repeat(auto-fill, minmax(150px, 1fr))',
+      },
+      gap: 1.5,
+    }}
+  >
+    {[
+      { title: 'Avg Genome', value: avgGenomeText },
+      { title: 'Min Genome', value: minGenomeText },
+      { title: 'Max Genome', value: maxGenomeText },
+    ].map((kpi) => (
+      <Paper
+        key={kpi.title}
+        sx={{
+          p: 1.5,
+          textAlign: 'center',
+          bgcolor: 'background.paper',
+          borderRadius: 2,
+          boxShadow: 1,
+          minHeight: 90,
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+        }}
+      >
+        <Typography
+          variant="h6"
+          sx={{
+            mb: 0.3,
+            fontSize: '1.1rem',
+            fontWeight: 600,
+            color: 'primary.main',
+            lineHeight: 1.2,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {kpi.value}
+        </Typography>
+        <Typography
+          variant="caption"
+          sx={{
+            color: 'text.secondary',
+            lineHeight: 1.1,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {kpi.title}
+        </Typography>
+      </Paper>
+    ))}
+  </Box>
+
+  {/* ======== GC % ======== */}
+  <Typography
+    variant="subtitle2"
+    sx={{
+      mt: 3,
+      mb: 1,
+      textTransform: 'uppercase',
+      letterSpacing: 0.12,
+      color: 'text.secondary',
+    }}
+  >
+    GC%
+  </Typography>
+
+  <Box
+    sx={{
+      display: 'grid',
+      gridTemplateColumns: {
+        xs: 'repeat(auto-fill, minmax(140px, 1fr))',
+        sm: 'repeat(auto-fill, minmax(150px, 1fr))',
+      },
+      gap: 1.5,
+    }}
+  >
+    {[
+      { title: 'Avg %GC', value: avgGcText },
+      { title: 'Min %GC', value: minGcText },
+      { title: 'Max %GC', value: maxGcText },
+    ].map((kpi) => (
+      <Paper
+        key={kpi.title}
+        sx={{
+          p: 1.5,
+          textAlign: 'center',
+          bgcolor: 'background.paper',
+          borderRadius: 2,
+          boxShadow: 1,
+          minHeight: 90,
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+        }}
+      >
+        <Typography
+          variant="h6"
+          sx={{
+            mb: 0.3,
+            fontSize: '1.1rem',
+            fontWeight: 600,
+            color: 'primary.main',
+            lineHeight: 1.2,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {kpi.value}
+        </Typography>
+        <Typography
+          variant="caption"
+          sx={{
+            color: 'text.secondary',
+            lineHeight: 1.1,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {kpi.title}
+        </Typography>
+      </Paper>
+    ))}
+  </Box>
+
+</Box>
+
+
 
             {/* Treemap με διαφανές background & τετράγωνο layout */}
             <Box
@@ -603,7 +905,7 @@ const treemapOption = useMemo(() => ({
     }}
   >
     <Typography variant="h6" sx={{ mb: 2, fontWeight: 500 }}>
-      Top 5 Genus
+      Top 5 Genera
     </Typography>
     {topGenus.map((item) => (
       <Box 

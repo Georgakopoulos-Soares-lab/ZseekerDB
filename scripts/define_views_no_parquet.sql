@@ -10,7 +10,7 @@ FROM data;
 -- 2) (Προαιρετικό) Ένα απλό view που δείχνει στο υπάρχον table 'metadata'
 --    Δεν είναι απαραίτητο για το backend, αλλά βοηθά σε ομοιομορφία.
 CREATE OR REPLACE VIEW metadata_view AS
-SELECT * FROM metadata;
+SELECT * FROM metadata WHERE genome_size >= 1000;
 
 -- 3) Γρήγορο sanity check
 -- SELECT COUNT(*) AS n_data FROM data;

@@ -35,6 +35,7 @@ import RangeFilter from '../components/RangeFilter';
 import { ColumnVisibilityMenu } from '../components/ColumnVisibilityMenu';
 import BasicTaxonomy from '../components/BasicTaxonomy';
 import { METADATA_COLUMNS } from '../components/DataTable';
+import { useTheme } from '@mui/material/styles';
 
 // ---------------- helpers ----------------
 
@@ -89,12 +90,27 @@ function makeBubbleSizer(sizes: number[]) {
   };
 }
 
+// Βασική παλέτα superkingdoms (ίδια με την αρχική σελίδα)
+const SUPERKINGDOM_COLORS = ['#4D77A9', '#F08F2A', '#E25558', '#77B7B3'] as const;
+
+const SUPERKINGDOM_COLOR_MAP: Record<string, string> = {
+  Archaea: SUPERKINGDOM_COLORS[0],
+  Bacteria: SUPERKINGDOM_COLORS[1],
+  Eukaryota: SUPERKINGDOM_COLORS[2],
+  Viruses: SUPERKINGDOM_COLORS[3],
+  '(NA)': '#9E9E9E', // fallback για missing
+};
+
+/* CHART COLORS----------- palettes (distinct per chart) ---------------- */
 /* CHART COLORS----------- palettes (distinct per chart) ---------------- */
 const CHART_PALETTES = {
-  genusBar: ['#4C78A8', '#9ECAE9', '#A0CBE8', '#6B6ECF'],      // μπλε αποχρώσεις
-  scatter:  ['#F58518', '#54A24B', '#E45756', '#72B7B2', '#B279A2', '#FF9DA6'], // ζεστές+ψυχρές
-  histGenome: ['#72B7B2', '#59A14F'],                           // teal/green
-  histGC:     ['#E45756', '#F28E2B'],                           // κόκκινο/πορτοκαλί
+  // εδώ κυρίως χρησιμοποιούμε το πρώτο χρώμα για το bar
+  genusBar: [SUPERKINGDOM_COLORS[0]],
+  // scatter: ίδια παλέτα ανά superkingdom
+  scatter: SUPERKINGDOM_COLORS,
+  // επιλέγουμε 1–1 superkingdom colors για τα hist
+  histGenome: [SUPERKINGDOM_COLORS[3]],
+  histGC: [SUPERKINGDOM_COLORS[2]],
 } as const;
 
 
@@ -186,6 +202,14 @@ const VIZ_LIMIT = 5000;      // δείγμα για charts
 const TOP_N_GENUS = 15;      // πόσα genus να δείχνει το bar
 
 export default function MetadataPage() {
+
+  const theme = useTheme();
+  const isDarkMode = theme.palette.mode === 'dark';
+
+  const axisTextColor = isDarkMode ? '#FFFFFF' : theme.palette.text.primary;
+  const axisLineColor = isDarkMode ? '#CCCCCC' : '#444444';
+  const gridLineColor = isDarkMode ? '#555555' : '#E0E0E0';
+
   // ------- Tabs -------
   const [tab, setTab] = useState(0);
 
@@ -210,7 +234,7 @@ export default function MetadataPage() {
   // 3) Advanced filters
   const [advOpen, setAdvOpen] = useState(false);
   const [rng, setRng] = useState<Ranges>({
-    genome_size_min: '',
+    genome_size_min: 1000,
     genome_size_max: '',
     genome_size_ungapped_min: '',
     genome_size_ungapped_max: '',
@@ -509,22 +533,31 @@ export default function MetadataPage() {
   );
 
   const genusBarOption = useMemo(() => ({
-    title: { text: 'Top Genera by avg Z-DNA density (/kb)', left: 'center' },
+    title: {
+      text: 'Top Genera by avg Z-DNA density (/kb)',
+      left: 'center',
+      textStyle: { color: axisTextColor },
+    },
     tooltip: { trigger: 'axis' },
     xAxis: {
       type: 'category',
       data: genusBar.cats,
-      axisLabel: { rotate: 35, margin: 16 },
+      axisLabel: { rotate: 35, margin: 16, color: axisTextColor },
       name: 'Genus',
       nameLocation: 'middle',
       nameGap: 130,
+      nameTextStyle: { color: axisTextColor },
+      axisLine: { lineStyle: { color: axisLineColor } },
     },
     yAxis: {
       type: 'value',
       name: 'avg density (/kb)',
       nameLocation: 'middle',
       nameGap: 45,
-      axisLabel: { margin: 12 },
+      axisLabel: { margin: 12, color: axisTextColor },
+      nameTextStyle: { color: axisTextColor },
+      axisLine: { lineStyle: { color: axisLineColor } },
+      splitLine: { lineStyle: { color: gridLineColor } },
     },
     series: [{
       type: 'bar',
@@ -532,7 +565,7 @@ export default function MetadataPage() {
       itemStyle: { color: CHART_PALETTES.genusBar[0] }
     }],
     grid: { left: 60, right: 20, top: 50, bottom: genusBottomPad }
-  }), [genusBar, genusBottomPad]);
+  }), [genusBar, genusBottomPad, axisTextColor, axisLineColor, gridLineColor]);
 
   // 2) Scatter: GC% vs Z-DNA density, bubble ~ genome_size, color = superkingdom
   const scatterData = useMemo(() => {
@@ -553,9 +586,13 @@ export default function MetadataPage() {
   const bubbleSizer = useMemo(() => makeBubbleSizer(scatterData.map((p) => p.size)), [scatterData]);
 
   const skCats = useMemo(() => {
-    const s = new Set<string>(); scatterData.forEach(p => s.add(p.sk || '(NA)'));
-    return Array.from(s);
+    const s = new Set<string>();
+    scatterData.forEach(p => s.add(p.sk || '(NA)'));
+    const arr = Array.from(s);
+    arr.sort((a, b) => a.localeCompare(b));
+    return arr;
   }, [scatterData]);
+
 
   const scatterSeries = useMemo(() => {
     const by = new Map<string, { value: number[]; name: string; label: { show: boolean } }[]>();
@@ -565,47 +602,66 @@ export default function MetadataPage() {
       arr.push({
         value: [p.gc, p.den, p.size],
         name: p.label,
-        label: { show: false }
+        label: { show: false },
       });
       by.set(k, arr);
     }
+
     return skCats.map((k) => ({
       name: k,
       type: 'scatter',
       data: by.get(k) ?? [],
       symbolSize: (val: any[]) => bubbleSizer(Number(val?.[2] ?? NaN)),
       emphasis: { focus: 'series' },
+      itemStyle: {
+        color: SUPERKINGDOM_COLOR_MAP[k] ?? CHART_PALETTES.scatter[0],
+      },
     }));
   }, [scatterData, skCats, bubbleSizer]);
 
   const scatterOption = useMemo(() => ({
-    color: CHART_PALETTES.scatter,
-    title: { text: 'GC% vs Z-DNA density (/kb)', left: 'center' },
+    // δεν χρειάζεται color εδώ, τα δίνουμε per-series
+    title: {
+      text: 'GC% vs Z-DNA density (/kb)',
+      left: 'center',
+      textStyle: { color: axisTextColor },
+    },
     tooltip: {
       trigger: 'item',
       formatter: (p: any) => {
         const [gc, den, sz] = p.value || [];
-        return `${p.seriesName}<br/>GC%: ${gc?.toFixed?.(2)}<br/>Z-DNA density (/kb): ${den?.toFixed?.(2)}${Number.isFinite(sz) ? `<br/>Genome size: ${Math.round(sz)}` : ''}`;
-      }
+        return `${p.seriesName}<br/>GC%: ${gc?.toFixed?.(2)}<br/>Z-DNA density (/kb): ${den?.toFixed?.(2)}${
+          Number.isFinite(sz) ? `<br/>Genome size: ${Math.round(sz)}` : ''
+        }`;
+      },
     },
-    legend: { top: 28 },
+    legend: {
+      top: 28,
+      data: skCats,
+      textStyle: { color: axisTextColor },
+    },
     xAxis: {
       type: 'value',
       name: 'GC %',
       nameLocation: 'middle',
       nameGap: 45,
-      axisLabel: { margin: 12 },
+      axisLabel: { margin: 12, color: axisTextColor },
+      nameTextStyle: { color: axisTextColor },
+      axisLine: { lineStyle: { color: axisLineColor } },
     },
     yAxis: {
       type: 'value',
       name: 'Z-DNA density (/kb)',
       nameLocation: 'middle',
       nameGap: 45,
-      axisLabel: { margin: 12 },
+      axisLabel: { margin: 12, color: axisTextColor },
+      nameTextStyle: { color: axisTextColor },
+      axisLine: { lineStyle: { color: axisLineColor } },
+      splitLine: { lineStyle: { color: gridLineColor } },
     },
     series: scatterSeries,
-    grid: { left: 70, right: 20, top: 70, bottom: 60 }
-  }), [scatterSeries]);
+    grid: { left: 70, right: 20, top: 70, bottom: 60 },
+  }), [scatterSeries, skCats, axisTextColor, axisLineColor, gridLineColor]);
 
   // 3) Genome size histogram
   const colGSizeLbl = useMemo(() => findColSmart(vizCols, 'genome_size'), [vizCols]);
@@ -630,38 +686,48 @@ const histGenomeBottom = useMemo(
   );
 
   const histGenomeOption = useMemo(() => {
-  return {
-    color: CHART_PALETTES.histGenome,
-    title: { text: 'Genome Size distribution', left: 'center' },
-    tooltip: { trigger: 'axis' },
-    xAxis: {
-      type: 'category',
-      data: histGenome.labels,
-      axisLabel: {
-        interval: 0,
-        rotate: 70,      // πιο «όρθια» labels
-        margin: 18,
-        width: 80,       // περιορισμένο πλάτος
-        overflow: 'break',
-        lineHeight: 12,
-        fontSize: 9,
-        hideOverlap: true,
+    return {
+      color: CHART_PALETTES.histGenome,
+      title: {
+        text: 'Genome Size distribution',
+        left: 'center',
+        textStyle: { color: axisTextColor },
       },
-      name: 'Genome size',
-      nameLocation: 'middle',
-      nameGap: 120,
-    },
-    yAxis: {
-      type: 'value',
-      name: 'Count',
-      nameLocation: 'middle',
-      nameGap: 45,
-      axisLabel: { margin: 12 },
-    },
-    series: [{ type: 'bar', data: histGenome.counts }],
-    grid: { left: 60, right: 20, top: 50, bottom: histGenomeBottom },
-  } as echarts.EChartsOption;
-}, [histGenome, histGenomeBottom]);
+      tooltip: { trigger: 'axis' },
+      xAxis: {
+        type: 'category',
+        data: histGenome.labels,
+        axisLabel: {
+          interval: 0,
+          rotate: 70,
+          margin: 18,
+          width: 80,
+          overflow: 'break',
+          lineHeight: 12,
+          fontSize: 9,
+          hideOverlap: true,
+          color: axisTextColor,
+        },
+        name: 'Genome size',
+        nameLocation: 'middle',
+        nameGap: 120,
+        nameTextStyle: { color: axisTextColor },
+        axisLine: { lineStyle: { color: axisLineColor } },
+      },
+      yAxis: {
+        type: 'value',
+        name: 'Count',
+        nameLocation: 'middle',
+        nameGap: 45,
+        axisLabel: { margin: 12, color: axisTextColor },
+        nameTextStyle: { color: axisTextColor },
+        axisLine: { lineStyle: { color: axisLineColor } },
+        splitLine: { lineStyle: { color: gridLineColor } },
+      },
+      series: [{ type: 'bar', data: histGenome.counts }],
+      grid: { left: 60, right: 20, top: 50, bottom: histGenomeBottom },
+    } as echarts.EChartsOption;
+  }, [histGenome, histGenomeBottom, axisTextColor, axisLineColor, gridLineColor]);
 
   // 4) GC% histogram
   const histGC = useMemo(() => {
@@ -683,7 +749,11 @@ const histGenomeBottom = useMemo(
   const histGCOption = useMemo(() => {
     return {
       color: CHART_PALETTES.histGC,
-      title: { text: 'GC% distribution', left: 'center' },
+      title: {
+        text: 'GC% distribution',
+        left: 'center',
+        textStyle: { color: axisTextColor },
+      },
       tooltip: { trigger: 'axis' },
       xAxis: {
         type: 'category',
@@ -695,22 +765,28 @@ const histGenomeBottom = useMemo(
           width: 90,
           overflow: 'break',
           lineHeight: 14,
+          color: axisTextColor,
         },
         name: 'GC %',
         nameLocation: 'middle',
         nameGap: 60,
+        nameTextStyle: { color: axisTextColor },
+        axisLine: { lineStyle: { color: axisLineColor } },
       },
       yAxis: {
         type: 'value',
         name: 'Count',
         nameLocation: 'middle',
         nameGap: 45,
-        axisLabel: { margin: 12 },
+        axisLabel: { margin: 12, color: axisTextColor },
+        nameTextStyle: { color: axisTextColor },
+        axisLine: { lineStyle: { color: axisLineColor } },
+        splitLine: { lineStyle: { color: gridLineColor } },
       },
       series: [{ type: 'bar', data: histGC.counts }],
       grid: { left: 60, right: 20, top: 50, bottom: histGCBottom },
     } as echarts.EChartsOption;
-  }, [histGC, histGCBottom]);
+  }, [histGC, histGCBottom, axisTextColor, axisLineColor, gridLineColor]);
 
   // Συνάρτηση για κεφαλαίο το πρώτο γράμμα και αντικατάσταση των κάτω παυλών με κενά
   const capitalize = (str: string) => {

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Box, Grid, Paper, Typography, CircularProgress } from '@mui/material';
 import ReactECharts from 'echarts-for-react';
 import { minWidth } from '@mui/system';
+import { useTheme } from '@mui/material/styles';
 
 /** call /api/sql with a normalized SELECT */
 async function fetchSql<T = any>(sql: string): Promise<T[]> {
@@ -43,6 +44,10 @@ export default function HomeInsights() {
   const [hist, setHist] = useState<{ bin: number; n: number }[]>([]);
   const [scatter, setScatter] = useState<{ gs: number; gc: number; sk: string }[]>([]);
 
+  const theme = useTheme();
+  const axisLabelColor = theme.palette.mode === 'dark' ? '#ffffff' : '#666666';
+  const axisNameColor = theme.palette.mode === 'dark' ? '#ffffff' : '#333333';
+
   useEffect(() => {
     let dead = false;
     (async () => {
@@ -57,12 +62,14 @@ export default function HomeInsights() {
             AVG(TRY_CAST(genome_size AS DOUBLE)) AS avg_genome_size,
             AVG(TRY_CAST(gc_percent  AS DOUBLE)) AS avg_gc
           FROM metadata
+          WHERE genome_size >= 1000
         `);
 
         // Donut: superkingdoms
         const skRows = await fetchSql<KV>(`
           SELECT COALESCE(superkingdom,'(unknown)') AS label, COUNT(*) AS n
           FROM metadata
+          WHERE genome_size >= 1000
           GROUP BY 1
           ORDER BY n DESC
         `);
@@ -75,7 +82,10 @@ export default function HomeInsights() {
             COUNT(*) AS cnt,
             COALESCE(MAX(superkingdom), '(unknown)') AS superkingdom
           FROM metadata
-          WHERE kingdom IS NOT NULL AND kingdom <> '' AND obs_density_per_kb IS NOT NULL
+          WHERE kingdom IS NOT NULL AND 
+            kingdom <> '' AND 
+            obs_density_per_kb IS NOT NULL AND 
+            genome_size >= 1000
           GROUP BY 1
           ORDER BY density DESC
           LIMIT 10
@@ -100,6 +110,7 @@ export default function HomeInsights() {
             superkingdom
           FROM metadata
           WHERE genome_size IS NOT NULL AND gc_percent IS NOT NULL
+            AND genome_size >= 1000
           USING SAMPLE 20000 ROWS
         `);
 
@@ -131,16 +142,27 @@ export default function HomeInsights() {
   }, []);
 
   // ECharts options
-  const pieOpt = useMemo(() => ({
-    tooltip: { trigger: 'item', formatter: (p: any) => `${p.name}<br/>${fmtNum(p.value)} (${fmtNum(p.percent)}%)` },
-    legend: { bottom: 0, type: 'scroll' },
-    series: [{
-      type: 'pie',
-      radius: ['50%','70%'],
-      label: { show: false },
-      data: sk.map(d => ({ name: d.label, value: d.n }))
-    }]
-  }), [sk]);
+const pieOpt = useMemo(() => ({
+  textStyle: {
+    color: axisLabelColor,
+  },
+  tooltip: {
+    trigger: 'item',
+    formatter: (p: any) => `${p.name}<br/>${fmtNum(p.value)} (${fmtNum(p.percent)}%)`
+  },
+  legend: {
+    bottom: 0,
+    type: 'scroll',
+    textStyle: { color: axisLabelColor }
+  },
+  series: [{
+    type: 'pie',
+    radius: ['50%','70%'],
+    label: { show: false },
+    data: sk.map(d => ({ name: d.label, value: d.n }))
+  }]
+}), [sk, axisLabelColor]);
+
 
   // palette for bars (repeats if more categories than colors)
   const PALETTE = [
@@ -154,22 +176,63 @@ export default function HomeInsights() {
     return Object.fromEntries(sorted.map((s, i) => [s.label, PALETTE[i % PALETTE.length]]));
   }, [sk]);
 
-  const topKOpt = useMemo(() => ({
-    tooltip: { trigger: 'axis', formatter: (p: any) => `${p[0]?.name ?? ''}: ${fmtNum(p[0]?.value ?? null)}` },
-    grid: { left: 120, right: 20, top: 20, bottom: 20 },
-    xAxis: { type: 'value', axisLabel: { formatter: (v: any) => fmtNum(Number(v)) } },
-    yAxis: { type: 'category', inverse: true, data: topK.map(d => d.label) },
-    series: [{
-      type: 'bar',
-      // color each bar according to its superkingdom using skColorMap
-      data: topK.map(d => ({
-        value: d.n,
-        itemStyle: { color: skColorMap[d.superkingdom ?? '(unknown)'] ?? PALETTE[0] }
-      }))
-    }]
-  }), [topK, skColorMap]);
+    // palette for bars (repeats if more categories than colors)
+  const PALETTE2 = [
+    '#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f',
+    '#edc949','#af7aa1','#ff9da7','#9c755f','#bab0ac'
+  ];
+
+    // ίδιο mapping superkingdom -> χρώμα για όλα τα plots που βασίζονται στα superkingdoms
+  const skColorMap2 = useMemo(() => {
+    const sorted = [...sk].sort((a, b) => a.label.localeCompare(b.label));
+    const map: Record<string, string> = {};
+    sorted.forEach((s, i) => {
+      map[s.label] = PALETTE2[i % PALETTE2.length];
+    });
+    return map;
+  }, [sk]);
+
+const topKOpt = useMemo(() => ({
+  textStyle: {
+    color: axisLabelColor,
+  },
+  tooltip: {
+    trigger: 'axis',
+    formatter: (p: any) => `${p[0]?.name ?? ''}: ${fmtNum(p[0]?.value ?? null)}`
+  },
+  grid: { left: 120, right: 20, top: 20, bottom: 20 },
+  xAxis: {
+    type: 'value',
+    axisLabel: {
+      formatter: (v: any) => fmtNum(Number(v)),
+      color: axisLabelColor
+    }
+  },
+  yAxis: {
+    type: 'category',
+    inverse: true,
+    data: topK.map(d => d.label),
+    axisLabel: {
+      color: axisLabelColor
+    }
+  },
+  legend: {
+    show: false, // ή true αν θες
+    textStyle: { color: axisLabelColor }
+  },
+  series: [{
+    type: 'bar',
+    data: topK.map(d => ({
+      value: d.n,
+      itemStyle: { color: skColorMap[d.superkingdom ?? '(unknown)'] ?? PALETTE[0] }
+    }))
+  }]
+}), [topK, skColorMap, axisLabelColor]);
 
 const histOpt = useMemo(() => ({
+  textStyle: {
+    color: axisLabelColor,
+  },
   tooltip: {
     trigger: 'axis',
     formatter: (p: any) => `${p[0]?.axisValue}: ${fmtNum(p[0]?.value ?? null)}`
@@ -183,143 +246,199 @@ const histOpt = useMemo(() => ({
   },
   xAxis: { 
     type: 'category', 
-    name: 'Score bin',
+    name: 'Score',
     nameLocation: 'middle',
     nameGap: 50,
+    nameTextStyle: { color: axisNameColor },
     data: hist.map(d => d.bin),
     axisLabel: {
       margin: 14,
       rotate: 45,
-      formatter: (v: any) => String(v)
+      formatter: (v: any) => String(v),
+      color: axisLabelColor
     }
   },
   yAxis: { 
-    type: 'log',          // 🔴 από 'value' σε 'log'
-    logBase: 10,          // προαιρετικό, για log10
-    min: 1,               // προαιρετικό, για να αποφύγουμε προβλήματα με 0
-    name: 'Count (log)',
+    type: 'log',
+    logBase: 10,
+    min: 1,
+    name: 'Counts (log{sub|10})',
+    nameTextStyle: {
+      color: axisNameColor,   // βασικό text
+      rich: {
+        sub: {
+          color: axisNameColor,
+          fontSize: 7,
+          verticalAlign: 'bottom',
+          padding: [6, 0, 0, 0]
+        }
+      }
+    },
     nameLocation: 'middle',
     nameGap: 70,
     axisLabel: {
-      // εμφανίζει τα πραγματικά counts (1, 10, 100, 1000, ...)
-      formatter: (v: any) => fmtInt(Number(v))
+      formatter: (v: any) => fmtInt(Number(v)),
+      color: axisLabelColor
     }
   },
   series: [{
     type: 'bar',
     data: hist.map(d => d.n)
   }]
-}), [hist]);
+}), [hist, axisLabelColor, axisNameColor]);
 
-  const scatterOpt = useMemo(() => {
-    const bySK = new Map<string, [number,number][]>();
-    scatter.forEach(p => {
-      const arr = bySK.get(p.sk || '(unknown)') || [];
-      arr.push([p.gs, p.gc]);
-      bySK.set(p.sk || '(unknown)', arr);
-    });
-    return {
-      tooltip: { trigger: 'item', formatter: (p: any) => `Genome size: ${fmtNum(p.value[0])}<br/>GC%: ${fmtNum(p.value[1])}` },
-      grid: { 
-        left: 80,    
-        right: 20,
-        top: 30,
-        bottom: 110,
-        containLabel: true
-      },
-      xAxis: { 
-        type: 'log',         // 🔴 ΑΛΛΑΓΗ: λογαριθμική κλίμακα
-        logBase: 10,         // log10 scale
-        min: 1,              // προαιρετικό — αποφυγή προβλήματος με τιμές 0
-        name: 'Genome size (log)',
-        nameLocation: 'middle',
-        nameGap: 100,
-        axisLabel: { 
-          formatter: (v: number) => fmtInt(Number(v)), 
-          margin: 20,
-          rotate: 45,
-          align: 'right'
+const scatterOpt = useMemo(() => {
+  const bySK = new Map<string, [number, number][]>();
+  scatter.forEach(p => {
+    const key = p.sk || '(unknown)';
+    const arr = bySK.get(key) || [];
+    arr.push([p.gs, p.gc]);
+    bySK.set(key, arr);
+  });
+
+  return {
+    textStyle: {
+      color: axisLabelColor,
+    },
+    tooltip: {
+      trigger: 'item',
+      formatter: (p: any) =>
+        `Genome size: ${fmtNum(p.value[0])}<br/>GC%: ${fmtNum(p.value[1])}`
+    },
+    grid: { 
+      left: 80,    
+      right: 20,
+      top: 30,
+      bottom: 110,
+      containLabel: true
+    },
+    xAxis: { 
+      type: 'log',
+      logBase: 10,
+      min: 1,
+      name: 'Genome size (log{sub|10})',
+      nameTextStyle: {
+        color: axisNameColor,
+        rich: {
+          sub: {
+            color: axisNameColor,
+            fontSize: 7,
+            verticalAlign: 'bottom',
+            padding: [6, 0, 0, 0]
+          }
         }
       },
-      yAxis: { 
-        type: 'value', 
-        name: 'GC%',
-        nameLocation: 'middle',
-        nameGap: 50,
-        axisLabel: { formatter: (v: number) => fmtNum(Number(v)) }
-      },
-      legend: { bottom: 0 },
-      series: Array.from(bySK.entries())
-        .sort(([a], [b]) => a.localeCompare(b))   // ⬅ ταξινόμηση superkingdom names
-        .map(([name, pts]) => ({
-          name,
-          type: 'scatter',
-          symbolSize: 6,
-          data: pts
-        }))
+      nameLocation: 'middle',
+      nameGap: 110,
+      axisLabel: { 
+        formatter: (v: number) => fmtInt(Number(v)), 
+        margin: 20,
+        rotate: 45,
+        align: 'right',
+        color: axisLabelColor
+      }
+    },
+    yAxis: { 
+      type: 'value', 
+      name: 'GC (%)',
+      nameLocation: 'middle',
+      nameGap: 50,
+      nameTextStyle: { color: axisNameColor },
+      axisLabel: { 
+        formatter: (v: number) => fmtNum(Number(v)),
+        color: axisLabelColor
+      }
+    },
+    legend: {
+      bottom: 0,
+      textStyle: { color: axisLabelColor }
+    },
+    series: Array.from(bySK.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, pts], idx) => ({
+        name,
+        type: 'scatter',
+        symbolSize: 6,
+        data: pts,
+        itemStyle: {
+          // ίδιο χρώμα με το Superkingdom distribution
+          color: skColorMap2[name] ?? PALETTE2[idx % PALETTE2.length],
+        },
+      })),
+  };
+}, [scatter, axisLabelColor, axisNameColor, skColorMap2]);
 
-    };
-  }, [scatter]);
 
-  // palette for bars (repeats if more categories than colors)
-  const PALETTE2 = [
-    '#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f',
-    '#edc949','#af7aa1','#ff9da7','#9c755f','#bab0ac'
-  ];
+const skBarOpt = useMemo(() => {
+  const sorted = [...sk].sort((a, b) => a.label.localeCompare(b.label));
+  const categories = sorted.map(s => s.label);
 
-  const skBarOpt = useMemo(() => {
-    // sort alphabetically by label for legend and x-axis
-    const sorted = [...sk].sort((a, b) => a.label.localeCompare(b.label));
-    const categories = sorted.map(s => s.label);
+  const seriesData = sorted.map((s, i) => ({
+    value: Math.log10((s.n ?? 0) + 1),
+    raw: s.n ?? 0,
+    itemStyle: { color: PALETTE2[i % PALETTE2.length] }
+  }));
 
-    // per-bar data with explicit color and raw count for tooltip
-    const seriesData = sorted.map((s, i) => ({
-      value: Math.log10((s.n ?? 0) + 1),
-      raw: s.n ?? 0,
-      itemStyle: { color: PALETTE2[i % PALETTE2.length] }
-    }));
-
-    return {
-      tooltip: {
-        trigger: 'item',
-        formatter: (p: any) =>
-          `${p.name}<br/>Count: ${p.data.raw}<br/>Normalized (log10): ${fmtNum(Number(p.data.value))}`
-      },
-      // explicitly show legend entries (alphabetical)
-      legend: {
-        show: true,
-        bottom: 0,
-        type: 'scroll',
-        data: categories,
-        textStyle: { color: '#fff' }, // ensure visible on dark theme
-        pageIconColor: '#ccc',
-        itemWidth: 14,
-        itemHeight: 10
-      },
-      // give extra bottom space so legend is visible
-      grid: { left: 40, right: 20, top: 20, bottom: 120, containLabel: true },
-      xAxis: {
-        type: 'category',
-        data: categories,
-        axisLabel: { interval: 0, rotate: 45 }
-      },
-      yAxis: {
-        type: 'value',
-        name: 'Normalized (log10)',
-        nameLocation: 'middle',
-        nameGap: 40,
-        axisLabel: { formatter: (v: any) => fmtNum(Number(v)) }
-      },
-      series: [
-        {
-          type: 'bar',
-          name: 'Superkingdom', // series has a name (keeps legend behavior consistent)
-          data: seriesData,
-          emphasis: { focus: 'series' }
+  return {
+    textStyle: {
+      color: axisLabelColor,
+    },
+    tooltip: {
+      trigger: 'item',
+      formatter: (p: any) =>
+        `${p.name}<br/>Count: ${p.data.raw}<br/>Normalized (log10): ${fmtNum(Number(p.data.value))}`
+    },
+    legend: {
+      show: true,
+      bottom: 0,
+      type: 'scroll',
+      data: categories,
+      textStyle: { color: axisLabelColor },
+      pageIconColor: axisLabelColor,
+      itemWidth: 14,
+      itemHeight: 10
+    },
+    grid: { left: 40, right: 20, top: 20, bottom: 120, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: categories,
+      axisLabel: {
+        interval: 0,
+        rotate: 45,
+        color: axisLabelColor
+      }
+    },
+    yAxis: {
+      type: 'value',
+      name: 'Counts (log{sub|10})',
+      nameTextStyle: {
+        color: axisNameColor,
+        rich: {
+          sub: {
+            color: axisNameColor,
+            fontSize: 7,
+            verticalAlign: 'bottom',
+            padding: [6, 0, 0, 0]
+          }
         }
-      ]
-    };
-  }, [sk]);
+      },
+      nameLocation: 'middle',
+      nameGap: 40,
+      axisLabel: {
+        formatter: (v: any) => fmtNum(Number(v)),
+        color: axisLabelColor
+      }
+    },
+    series: [
+      {
+        type: 'bar',
+        name: 'Superkingdom',
+        data: seriesData,
+        emphasis: { focus: 'series' }
+      }
+    ]
+  };
+}, [sk, axisLabelColor, axisNameColor]);
 
   return (
     <Box sx={{ mt: 4 }}>
@@ -390,7 +509,7 @@ const histOpt = useMemo(() => ({
           <Grid container spacing={2} sx={{ width: '100%', mt: 0 }}>
             <Grid item xs={12} md={6} sx={{ minWidth: '48%' }}>
               <Paper sx={{ p: 2, height: 380, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, marginBottom: '12px' }}>Z-DNA score — histogram (sampled)</Typography>
+                <Typography variant="subtitle2" sx={{ mb: 1, marginBottom: '12px' }}>Scores distribution (sampled)</Typography>
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <ReactECharts style={{ width: '100%', height: '100%' }} option={histOpt} />
                 </Box>
