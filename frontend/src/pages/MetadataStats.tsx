@@ -446,26 +446,26 @@ const treemapOption = useMemo(() => ({
     colorMappingBy: 'index',
 
     // labels
-    label: {
-      show: true,
-      formatter: '{b}',
-      color: isDarkMode ? '#ffffff' : '#111111',   // 👈 ΔΥΝΑΜΙΚΟ ΧΡΩΜΑ
-      overflow: 'truncate',
-      fontSize: 13,
-      minFontSize: 11,
-    },
+label: {
+  show: true,
+  formatter: '{b}',
+  color: isDarkMode ? '#ffffff' : '#111111',   // 👈 ΔΥΝΑΜΙΚΟ ΧΡΩΜΑ
+  overflow: 'truncate',
+  fontSize: 13,
+  minFontSize: 11,
+},
 
-    upperLabel: {
-      show: true,
-      height: 28,
-      color: isDarkMode ? '#ffffff' : '#111111',   // 👈 ΔΥΝΑΜΙΚΟ ΧΡΩΜΑ
-      formatter: '{b}',
-      textStyle: {
-        fontSize: 14,
-        fontWeight: 600,
-        color: isDarkMode ? '#ffffff' : '#111111', // 👈 ΕΠΙΠΛΕΟΝ εδώ
-      },
-    },
+upperLabel: {
+  show: true,
+  height: 28,
+  color: isDarkMode ? '#ffffff' : '#111111',   // 👈 ΔΥΝΑΜΙΚΟ ΧΡΩΜΑ
+  formatter: '{b}',
+  textStyle: {
+    fontSize: 14,
+    fontWeight: 600,
+    color: isDarkMode ? '#ffffff' : '#111111', // 👈 ΕΠΙΠΛΕΟΝ εδώ
+  },
+},
 
     // Γενικό style: ΚΑΘΟΛΟΥ άσπρα borders
     itemStyle: {
@@ -600,7 +600,7 @@ const treemapOption = useMemo(() => ({
       { title: 'Total Assemblies', value: fmtInt(totalAssemblies) },
       { title: 'Superkingdoms', value: fmtInt(totalSuperkingdoms) },
       { title: 'Kingdoms', value: fmtInt(totalKingdoms) },
-      { title: 'Phylum', value: fmtInt(totalPhylum) },
+      { title: 'Phyla', value: fmtInt(totalPhylum) },
       { title: 'Classes', value: fmtInt(totalClasses) },
       { title: 'Orders', value: fmtInt(totalOrders) },
       { title: 'Families', value: fmtInt(totalFamilies) },
@@ -829,7 +829,7 @@ const treemapOption = useMemo(() => ({
     }}
   >
     <Typography variant="h6" sx={{ mb: 2, fontWeight: 500 }}>
-      Species in each superkingdom (count)
+      Assemblies in each superkingdom (counts)
     </Typography>
     {superkingdoms.map((item) => (
       <Box 
