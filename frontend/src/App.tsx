@@ -8,6 +8,7 @@ import DataStats from './pages/DataStats'
 import HelpDocs from './pages/HelpDocs'
 import Privacy from './pages/Privacy'
 import About from './pages/About'
+import DownloadDataset from './pages/DownloadDataset'
 
 import HomeInsights from './pages/HomeInsights'   // <-- new import
 import AdditionalTools from './pages/AdditionalTools'
@@ -73,6 +74,7 @@ export default function App() {
         <Route path="/help" element={<HelpDocs />} />
         <Route path="/about" element={<About />} />
         <Route path="/privacy" element={<Privacy />} />
+        <Route path="/download" element={<DownloadDataset />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

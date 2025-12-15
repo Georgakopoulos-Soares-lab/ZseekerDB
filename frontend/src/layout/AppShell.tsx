@@ -10,6 +10,7 @@ import SearchIcon from '@mui/icons-material/Search';
 import PrivacyIcon from '@mui/icons-material/Lock';
 import HelpIcon from '@mui/icons-material/Help';
 import AboutIcon from '@mui/icons-material/Info';
+import DownloadIcon from '@mui/icons-material/Download';
 import DnsIcon from '@mui/icons-material/Dns';
 import MenuIcon from '@mui/icons-material/Menu';
 import DarkModeIcon from '@mui/icons-material/DarkMode';
@@ -27,6 +28,7 @@ const items = [
   { to: '/help', label: 'Help', icon: <HelpIcon /> },
   { to: '/about', label: 'About', icon: <AboutIcon /> },
   { to: '/privacy', label: 'Privacy', icon: <PrivacyIcon /> },
+  { to: '/download', label: 'Download', icon: <DownloadIcon /> },
 ];
 
 //{ to: '/data-stats', label: 'Insights', icon: <AnalyticsIcon /> },
