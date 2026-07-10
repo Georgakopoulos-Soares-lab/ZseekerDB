@@ -4,6 +4,7 @@ package main
 import (
 	"database/sql"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -19,8 +20,9 @@ import (
 )
 
 type Config struct {
-	DBPath  string
-	Threads int
+	DBPath    string
+	StaticDir string
+	Threads   int
 	// (κρατιούνται για συμβατότητα, δεν χρησιμοποιούνται πλέον)
 	ZdnaParquet   string
 	MetadataGlob  string
@@ -41,10 +43,12 @@ func loadConfig() (*Config, error) {
 		return def
 	}
 	cfg := &Config{}
-	// default στο path που χρησιμοποιείς
-	cfg.DBPath = get("DUCKDB_PATH", "C:/zdna/zdnadatabase.duckdb")
+	// Use relative Linux-friendly defaults. Railway can override DUCKDB_PATH
+	// with a persistent-volume path such as /data/zdnadatabase.duckdb.
+	cfg.DBPath = get("DUCKDB_PATH", "data/zdnadatabase.duckdb")
+	cfg.StaticDir = get("STATIC_DIR", "frontend/dist")
 	cfg.MetadataGlob = get("METADATA_GLOB", "")
-	cfg.TempDir = get("DUCKDB_TEMP_DIR", "C:/zdna/data/tmp")
+	cfg.TempDir = get("DUCKDB_TEMP_DIR", "data/tmp")
 	if p, err := strconv.Atoi(get("DUCKDB_MAX_TEMP_GIB", "50")); err == nil {
 		cfg.MaxTempGiB = p
 	} else {
@@ -81,8 +85,9 @@ func sqlQuote(s string) string      { return strings.ReplaceAll(s, "'", "''") }
 func quoteIdent(id string) string   { return `"` + strings.ReplaceAll(id, `"`, `""`) + `"` }
 
 type Server struct {
-	cfg *Config
-	db  *sql.DB
+	cfg   *Config
+	db    *sql.DB
+	dbErr error
 }
 
 func openDuckDB(cfg *Config) (*sql.DB, error) {
@@ -162,7 +167,69 @@ func getColumnsLimit0(db *sql.DB, table string) ([]string, error) {
 
 // ---------- health / admin ----------
 func (s *Server) health(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "time": time.Now().UTC()})
+	status := "ok"
+	response := gin.H{"status": status, "time": time.Now().UTC(), "database_path": s.cfg.DBPath}
+	if s.db == nil {
+		status = "degraded"
+		response["status"] = status
+		response["database"] = "unavailable"
+		if s.dbErr != nil {
+			response["detail"] = s.dbErr.Error()
+		}
+	} else {
+		response["database"] = "available"
+	}
+	// Keep this endpoint successful when the optional DuckDB file is not mounted.
+	// Railway uses a 200 response here to determine that the web service is live.
+	c.JSON(http.StatusOK, response)
+}
+
+func (s *Server) databaseRequired() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/api/") && c.Request.URL.Path != "/api/health" && s.db == nil {
+			response := gin.H{
+				"error":         "DuckDB database is unavailable",
+				"database_path": s.cfg.DBPath,
+			}
+			if s.dbErr != nil {
+				response["detail"] = s.dbErr.Error()
+			}
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, response)
+			return
+		}
+		c.Next()
+	}
+}
+
+func frontendHandler(staticDir string) gin.HandlerFunc {
+	indexPath := filepath.Join(staticDir, "index.html")
+	if _, err := os.Stat(indexPath); err != nil {
+		log.Printf("Frontend build not found at %s: %v", indexPath, err)
+		return func(c *gin.Context) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "frontend build not found"})
+		}
+	}
+
+	fileServer := http.FileServer(http.Dir(staticDir))
+	return func(c *gin.Context) {
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "API route not found"})
+			return
+		}
+
+		relativePath := strings.TrimPrefix(filepath.Clean(c.Request.URL.Path), string(filepath.Separator))
+		if relativePath != "" {
+			if info, err := os.Stat(filepath.Join(staticDir, relativePath)); err == nil && !info.IsDir() {
+				fileServer.ServeHTTP(c.Writer, c.Request)
+				return
+			}
+		}
+		c.File(indexPath)
+	}
 }
 func (s *Server) adminInit(c *gin.Context) {
 	if err := s.createOrReplaceViews(); err != nil {
@@ -998,18 +1065,36 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("Opening DuckDB at %s", cfg.DBPath)
-	db, err := openDuckDB(cfg)
-	if err != nil {
-		log.Fatalf("open duckdb: %v", err)
-	}
-	defer db.Close()
 
-	s := &Server{cfg: cfg, db: db}
-	_ = s.createOrReplaceViews() // «ήπιο» init
+	var db *sql.DB
+	var dbErr error
+	if _, err := os.Stat(cfg.DBPath); err != nil {
+		dbErr = err
+		if errors.Is(err, os.ErrNotExist) {
+			log.Printf("DuckDB file not found at %s; starting without database", cfg.DBPath)
+		} else {
+			log.Printf("Cannot inspect DuckDB path %s; starting without database: %v", cfg.DBPath, err)
+		}
+	} else {
+		log.Printf("Opening DuckDB at %s", cfg.DBPath)
+		db, dbErr = openDuckDB(cfg)
+		if dbErr != nil {
+			log.Printf("Cannot open DuckDB; starting without database: %v", dbErr)
+			db = nil
+		}
+	}
+	if db != nil {
+		defer db.Close()
+	}
+
+	s := &Server{cfg: cfg, db: db, dbErr: dbErr}
+	if s.db != nil {
+		_ = s.createOrReplaceViews() // «ήπιο» init
+	}
 
 	r := gin.Default()
 	r.Use(corsMiddleware(cfg.CORSOrigins))
+	r.Use(s.databaseRequired())
 
 	// health/admin
 	r.GET("/api/health", s.health)
@@ -1061,6 +1146,7 @@ func main() {
 		data, _ := rowsToMaps(rows)
 		c.JSON(http.StatusOK, gin.H{"data": data})
 	})
+	r.NoRoute(frontendHandler(cfg.StaticDir))
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	log.Printf("ZDNA backend listening on http://%s", addr)
