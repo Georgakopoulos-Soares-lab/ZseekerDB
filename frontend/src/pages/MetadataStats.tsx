@@ -540,7 +540,7 @@ upperLabel: {
     <Box sx={{ p: 2 }}>
       {/* Τίτλος σελίδας */}
       <Typography variant="h5" align="center" sx={{ mb: 3, fontWeight: 600 }}>
-        ZDNA-Database insights
+        ZSeekerDB insights
       </Typography>
 
       {loading && (
