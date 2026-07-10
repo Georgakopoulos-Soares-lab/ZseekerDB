@@ -285,8 +285,8 @@ func (s *Server) homeInsights(c *gin.Context) {
 
 	g.Go(func() error {
 		rows, err := s.db.Query(`
-			SELECT FLOOR("Z-DNA Score"/10)*10 AS bin, COUNT(*) AS n
-			FROM data USING SAMPLE 200000 ROWS
+			SELECT FLOOR(score/10)*10 AS bin, COUNT(*) AS n
+			FROM (SELECT "Z-DNA Score" AS score FROM data USING SAMPLE 200000 ROWS) s
 			GROUP BY 1 ORDER BY 1`)
 		if err != nil {
 			return err
