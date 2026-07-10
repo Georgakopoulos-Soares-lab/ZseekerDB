@@ -32,6 +32,5 @@ ENV GIN_MODE=release \
     PORT=8080 \
     DUCKDB_PATH=/data/zdnadatabase.duckdb \
     DUCKDB_TEMP_DIR=/tmp/duckdb
-USER zseeker
 EXPOSE 8080
 CMD ["/app/zseeker-api"]

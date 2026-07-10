@@ -2,8 +2,11 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"database/sql"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -12,11 +15,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	_ "github.com/marcboeker/go-duckdb"
+	"golang.org/x/sync/errgroup"
 )
 
 type Config struct {
@@ -99,6 +104,7 @@ func openDuckDB(cfg *Config) (*sql.DB, error) {
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}
+	db.SetMaxIdleConns(4) // keep warm connections for parallel queries
 	// optional pragmas
 	td := normalizePath(cfg.TempDir)
 	_ = os.MkdirAll(filepath.FromSlash(td), 0o755)
@@ -126,6 +132,246 @@ SELECT "Chromosome","Start","End","Z-DNA Score","Sequence", "assembly" AS "Assem
 		return err
 	}
 	return nil
+}
+
+// ---------- home insights: single cached endpoint ----------
+
+type insightsCacheEntry struct {
+	mu      sync.Mutex
+	payload []byte
+	expiry  time.Time
+}
+
+var insightsCached insightsCacheEntry
+
+// serveJSON writes JSON with optional gzip and browser-cache headers.
+func serveJSON(c *gin.Context, payload []byte) {
+	c.Header("Cache-Control", "public, max-age=900")
+	if strings.Contains(c.Request.Header.Get("Accept-Encoding"), "gzip") {
+		var buf bytes.Buffer
+		gz, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+		_, _ = gz.Write(payload)
+		_ = gz.Close()
+		c.Header("Content-Encoding", "gzip")
+		c.Header("Vary", "Accept-Encoding")
+		c.Data(http.StatusOK, "application/json; charset=utf-8", buf.Bytes())
+		return
+	}
+	c.Data(http.StatusOK, "application/json; charset=utf-8", payload)
+}
+
+func (s *Server) homeInsights(c *gin.Context) {
+	// Serve from cache if still fresh.
+	insightsCached.mu.Lock()
+	if insightsCached.payload != nil && time.Now().Before(insightsCached.expiry) {
+		payload := insightsCached.payload
+		insightsCached.mu.Unlock()
+		c.Header("X-Cache", "HIT")
+		serveJSON(c, payload)
+		return
+	}
+	insightsCached.mu.Unlock()
+
+	type KV struct {
+		Label string  `json:"label"`
+		N     float64 `json:"n"`
+	}
+	type TopKV struct {
+		Label        string  `json:"label"`
+		Density      float64 `json:"density"`
+		Cnt          int64   `json:"cnt"`
+		Superkingdom string  `json:"superkingdom"`
+	}
+	type HistBin struct {
+		Bin float64 `json:"bin"`
+		N   int64   `json:"n"`
+	}
+	type ScatterPt struct {
+		GS float64 `json:"gs"`
+		GC float64 `json:"gc"`
+		SK string  `json:"sk"`
+	}
+	type KPIs struct {
+		TotalAssemblies int64   `json:"total_assemblies"`
+		UniqueTaxids    int64   `json:"unique_taxids"`
+		AvgGenomeSize   float64 `json:"avg_genome_size"`
+		AvgGC           float64 `json:"avg_gc"`
+	}
+	type InsightsResponse struct {
+		KPIs         KPIs        `json:"kpis"`
+		Superkingdoms []KV       `json:"superkingdoms"`
+		TopKingdoms  []TopKV    `json:"top_kingdoms"`
+		Histogram    []HistBin   `json:"histogram"`
+		Scatter      []ScatterPt `json:"scatter"`
+	}
+
+	var (
+		kpis    KPIs
+		skRows  []KV
+		topRows []TopKV
+		histRows []HistBin
+		scRows  []ScatterPt
+	)
+
+	// Run all five queries concurrently — total wall-time ≈ slowest query, not sum.
+	var g errgroup.Group
+
+	g.Go(func() error {
+		var gs, gc sql.NullFloat64
+		var ta, ut sql.NullInt64
+		err := s.db.QueryRow(`
+			SELECT COUNT(*), COUNT(DISTINCT taxid),
+			       AVG(TRY_CAST(genome_size AS DOUBLE)),
+			       AVG(TRY_CAST(gc_percent  AS DOUBLE))
+			FROM metadata WHERE genome_size >= 1000`).Scan(&ta, &ut, &gs, &gc)
+		if err != nil {
+			return err
+		}
+		kpis = KPIs{
+			TotalAssemblies: ta.Int64,
+			UniqueTaxids:    ut.Int64,
+			AvgGenomeSize:   gs.Float64,
+			AvgGC:           gc.Float64,
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		rows, err := s.db.Query(`
+			SELECT COALESCE(superkingdom,'(unknown)') AS label, COUNT(*) AS n
+			FROM metadata WHERE genome_size >= 1000
+			GROUP BY 1 ORDER BY n DESC`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var kv KV
+			var n sql.NullInt64
+			if err := rows.Scan(&kv.Label, &n); err != nil {
+				return err
+			}
+			kv.N = float64(n.Int64)
+			skRows = append(skRows, kv)
+		}
+		return rows.Err()
+	})
+
+	g.Go(func() error {
+		rows, err := s.db.Query(`
+			SELECT kingdom AS label,
+			       AVG(TRY_CAST(obs_density_per_kb AS DOUBLE)) AS density,
+			       COUNT(*) AS cnt,
+			       COALESCE(MAX(superkingdom),'(unknown)') AS superkingdom
+			FROM metadata
+			WHERE kingdom IS NOT NULL AND kingdom <> ''
+			  AND obs_density_per_kb IS NOT NULL AND genome_size >= 1000
+			GROUP BY 1 ORDER BY density DESC LIMIT 10`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var t TopKV
+			var density sql.NullFloat64
+			if err := rows.Scan(&t.Label, &density, &t.Cnt, &t.Superkingdom); err != nil {
+				return err
+			}
+			t.Density = density.Float64
+			topRows = append(topRows, t)
+		}
+		return rows.Err()
+	})
+
+	g.Go(func() error {
+		rows, err := s.db.Query(`
+			SELECT FLOOR("Z-DNA Score"/10)*10 AS bin, COUNT(*) AS n
+			FROM data USING SAMPLE 200000 ROWS
+			GROUP BY 1 ORDER BY 1`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var h HistBin
+			var bin sql.NullFloat64
+			var n sql.NullInt64
+			if err := rows.Scan(&bin, &n); err != nil {
+				return err
+			}
+			h.Bin = bin.Float64
+			h.N = n.Int64
+			histRows = append(histRows, h)
+		}
+		return rows.Err()
+	})
+
+	g.Go(func() error {
+		rows, err := s.db.Query(`
+			SELECT TRY_CAST(genome_size AS DOUBLE) AS gs,
+			       TRY_CAST(gc_percent  AS DOUBLE) AS gc,
+			       COALESCE(superkingdom,'(unknown)') AS sk
+			FROM metadata
+			WHERE genome_size IS NOT NULL AND gc_percent IS NOT NULL
+			  AND genome_size >= 1000
+			USING SAMPLE 5000 ROWS`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p ScatterPt
+			var gs, gc sql.NullFloat64
+			if err := rows.Scan(&gs, &gc, &p.SK); err != nil {
+				return err
+			}
+			p.GS = gs.Float64
+			p.GC = gc.Float64
+			scRows = append(scRows, p)
+		}
+		return rows.Err()
+	})
+
+	if err := g.Wait(); err != nil {
+		log.Println("homeInsights error:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Ensure non-null JSON arrays.
+	if skRows == nil {
+		skRows = []KV{}
+	}
+	if topRows == nil {
+		topRows = []TopKV{}
+	}
+	if histRows == nil {
+		histRows = []HistBin{}
+	}
+	if scRows == nil {
+		scRows = []ScatterPt{}
+	}
+
+	resp := InsightsResponse{
+		KPIs:         kpis,
+		Superkingdoms: skRows,
+		TopKingdoms:  topRows,
+		Histogram:    histRows,
+		Scatter:      scRows,
+	}
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	insightsCached.mu.Lock()
+	insightsCached.payload = payload
+	insightsCached.expiry = time.Now().Add(15 * time.Minute)
+	insightsCached.mu.Unlock()
+
+	c.Header("X-Cache", "MISS")
+	serveJSON(c, payload)
 }
 
 func rowsToMaps(rows *sql.Rows) ([]map[string]any, error) {
@@ -1092,7 +1338,8 @@ func main() {
 		_ = s.createOrReplaceViews() // «ήπιο» init
 	}
 
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Recovery()) // panic recovery without request logging
 	r.Use(corsMiddleware(cfg.CORSOrigins))
 	r.Use(s.databaseRequired())
 
@@ -1111,6 +1358,9 @@ func main() {
 	r.GET("/api/zdna/export", s.zdnaExport)
 	r.GET("/api/zdna/distinct_chr", s.zdnaDistinctChr) // ΝΕΟ
 	r.GET("/api/zdna/score_histogram", s.zdnaScoreHistogram)
+
+	// home insights (fast-path: parallel queries + 15-min server cache + gzip + browser cache)
+	r.GET("/api/home/insights", s.homeInsights)
 
 	// sql helpers
 	r.GET("/api/sql", s.sqlGet)

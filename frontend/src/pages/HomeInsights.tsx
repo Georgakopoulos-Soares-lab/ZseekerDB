@@ -2,19 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Box, Grid, Paper, Typography, CircularProgress } from '@mui/material';
 import ReactECharts from 'echarts-for-react';
-import { minWidth } from '@mui/system';
 import { useTheme } from '@mui/material/styles';
-
-/** call /api/sql with a normalized SELECT */
-async function fetchSql<T = any>(sql: string): Promise<T[]> {
-  const normalized = sql.replace(/\s+/g, ' ').trim();
-  const url = `/api/sql?query=${encodeURIComponent(normalized)}`;
-  const res = await fetch(url, { headers: { Accept: 'application/json' }, cache: 'no-store' });
-  const text = await res.text();
-  let json: any = null; try { json = JSON.parse(text); } catch {}
-  if (!res.ok) throw new Error(json?.error || `SQL HTTP ${res.status}`);
-  return (Array.isArray(json?.data) ? json.data : []) as T[];
-}
 
 const fmtNum = (n: number | null | undefined) =>
   typeof n === 'number' && Number.isFinite(n)
@@ -54,84 +42,26 @@ export default function HomeInsights() {
       try {
         setLoading(true); setError(null);
 
-        // KPIs
-        const [ov] = await fetchSql<any>(`
-          SELECT
-            COUNT(*) AS total_assemblies,
-            COUNT(DISTINCT taxid) AS unique_taxids,
-            AVG(TRY_CAST(genome_size AS DOUBLE)) AS avg_genome_size,
-            AVG(TRY_CAST(gc_percent  AS DOUBLE)) AS avg_gc
-          FROM metadata
-          WHERE genome_size >= 1000
-        `);
-
-        // Donut: superkingdoms
-        const skRows = await fetchSql<KV>(`
-          SELECT COALESCE(superkingdom,'(unknown)') AS label, COUNT(*) AS n
-          FROM metadata
-          WHERE genome_size >= 1000
-          GROUP BY 1
-          ORDER BY n DESC
-        `);
-
-        // Top 10 kingdoms — choose those with highest Z‑DNA/-RNA density (obs_density_per_kb)
-        const topKRows = await fetchSql<any>(`
-          SELECT
-            kingdom AS label,
-            AVG(TRY_CAST(obs_density_per_kb AS DOUBLE)) AS density,
-            COUNT(*) AS cnt,
-            COALESCE(MAX(superkingdom), '(unknown)') AS superkingdom
-          FROM metadata
-          WHERE kingdom IS NOT NULL AND 
-            kingdom <> '' AND 
-            obs_density_per_kb IS NOT NULL AND 
-            genome_size >= 1000
-          GROUP BY 1
-          ORDER BY density DESC
-          LIMIT 10
-        `);
-
-        // Histogram: Z‑DNA score (SELECT με υποερώτημα — ΟΧΙ WITH)
-        const histRows = await fetchSql<{ bin: number; n: number }>(`
-          SELECT FLOOR(score/10)*10 AS bin, COUNT(*) AS n
-          FROM (
-            SELECT "Z-DNA Score" AS score
-            FROM data USING SAMPLE 200000 ROWS
-          ) f
-          GROUP BY 1
-          ORDER BY 1
-        `);
-
-        // Scatter: genome size vs GC% (sampled)
-        const scRows = await fetchSql<{ gs: number; gc: number; superkingdom: string }>(`
-          SELECT
-            TRY_CAST(genome_size AS DOUBLE) AS gs,
-            TRY_CAST(gc_percent  AS DOUBLE) AS gc,
-            superkingdom
-          FROM metadata
-          WHERE genome_size IS NOT NULL AND gc_percent IS NOT NULL
-            AND genome_size >= 1000
-          USING SAMPLE 20000 ROWS
-        `);
+        // Single request — backend runs all 5 queries in parallel and caches for 15 min.
+        const res = await fetch('/api/home/insights', { headers: { Accept: 'application/json' } });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const d = await res.json();
 
         if (dead) return;
-        setTotalAssemblies(parseInt(ov?.total_assemblies ?? 0, 10));
-        setUniqueTaxids(parseInt(ov?.unique_taxids ?? 0, 10));
+        setTotalAssemblies(d.kpis.total_assemblies);
+        setUniqueTaxids(d.kpis.unique_taxids);
+        setAvgGenome(d.kpis.avg_genome_size);
+        setAvgGC(d.kpis.avg_gc);
 
-        setAvgGenome(Number(ov?.avg_genome_size ?? null));
-        setAvgGC(Number(ov?.avg_gc ?? null));
-
-        setSK(skRows);
-        // topK now carries density in `n` (used for plotting) and cnt as raw count
-        setTopK(topKRows.map((r: any) => ({
+        setSK((d.superkingdoms ?? []).map((r: any) => ({ label: String(r.label), n: Number(r.n) })));
+        setTopK((d.top_kingdoms ?? []).map((r: any) => ({
           label: String(r.label),
-          n: Number(r.density ?? 0),               // density per kb (plotted)
+          n: Number(r.density ?? 0),
           superkingdom: String(r.superkingdom ?? '(unknown)'),
-          // keep the raw count available if needed (not part of KV type but harmless)
-          cnt: Number(r.cnt ?? 0)
+          cnt: Number(r.cnt ?? 0),
         })));
-        setHist(histRows.map(r => ({ bin: Number(r.bin), n: Number(r.n) })));
-        setScatter(scRows.map(r => ({ gs: Number(r.gs), gc: Number(r.gc), sk: String(r.superkingdom || '') })));
+        setHist((d.histogram ?? []).map((r: any) => ({ bin: Number(r.bin), n: Number(r.n) })));
+        setScatter((d.scatter ?? []).map((r: any) => ({ gs: Number(r.gs), gc: Number(r.gc), sk: String(r.sk || '') })));
       } catch (e: any) {
         if (!dead) setError(e?.message || 'Failed to load home insights');
       } finally {
