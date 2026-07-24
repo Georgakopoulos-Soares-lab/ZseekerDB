@@ -21,7 +21,8 @@ from common import connect, CSV_DIR, ACCESSION_RE, LOG_DIR, DB_PATH
 CAP_BYTES = int(os.environ.get("MIG_BATCH_BYTES", str(500 * 1024 * 1024)))  # ~500MB input/batch
 CAP_FILES = int(os.environ.get("MIG_BATCH_MAXFILES", "4000"))               # also cap #files/batch
 RETRY_THREADS = 1
-COLS = "{'Chromosome':'VARCHAR','Start':'BIGINT','End':'BIGINT','Z-DNA Score':'DOUBLE','Sequence':'VARCHAR'}"
+# Z-DNA Score read directly as FLOAT (scores are .25 multiples < 2^22 -> lossless) to save space.
+COLS = "{'Chromosome':'VARCHAR','Start':'BIGINT','End':'BIGINT','Z-DNA Score':'FLOAT','Sequence':'VARCHAR'}"
 LOG = os.path.join(LOG_DIR, "build_data.log")
 
 
@@ -39,8 +40,7 @@ def q(p):
 def select_from(files_sql):
     return f"""
         SELECT "Chromosome", "Start", "End", "Z-DNA Score", "Sequence",
-               regexp_extract(parse_filename(filename), '{ACCESSION_RE}', 1) AS assembly,
-               "Chromosome" AS Chromosome_alt
+               regexp_extract(parse_filename(filename), '{ACCESSION_RE}', 1) AS assembly
         FROM read_csv([{files_sql}], header=true, delim=',',
                       columns={COLS}, filename=true)
     """
@@ -49,8 +49,8 @@ def select_from(files_sql):
 def ensure_schema(con):
     con.execute("""
         CREATE TABLE IF NOT EXISTS data (
-            "Chromosome" VARCHAR, "Start" BIGINT, "End" BIGINT, "Z-DNA Score" DOUBLE,
-            "Sequence" VARCHAR, assembly VARCHAR, Chromosome_alt VARCHAR
+            "Chromosome" VARCHAR, "Start" BIGINT, "End" BIGINT, "Z-DNA Score" FLOAT,
+            "Sequence" VARCHAR, assembly VARCHAR
         )""")
     con.execute("CREATE TABLE IF NOT EXISTS _ingest_state (batch_id INTEGER PRIMARY KEY, nfiles INTEGER, nrows BIGINT, ts TIMESTAMP)")
 

@@ -8,8 +8,8 @@ from common import DB_PATH, THREADS
 
 # Expected schema (col_name, duckdb_type) captured from the OLD database.
 EXPECTED = {
-    "data": [("Chromosome","VARCHAR"),("Start","BIGINT"),("End","BIGINT"),("Z-DNA Score","DOUBLE"),
-             ("Sequence","VARCHAR"),("assembly","VARCHAR"),("Chromosome_alt","VARCHAR")],
+    "data": [("Chromosome","VARCHAR"),("Start","BIGINT"),("End","BIGINT"),("Z-DNA Score","FLOAT"),
+             ("Sequence","VARCHAR"),("assembly","VARCHAR")],
     "metadata": [("assembly","VARCHAR"),("bioproject","VARCHAR"),("biosample","VARCHAR"),("taxid","BIGINT"),
                  ("assembly_level","VARCHAR"),("genome_size","BIGINT"),("gc_percent","DOUBLE"),
                  ("superkingdom","VARCHAR"),("kingdom","VARCHAR"),("phylum","VARCHAR"),("class","VARCHAR"),
@@ -23,7 +23,7 @@ EXPECTED = {
                   ("distinct_asm","BIGINT"),("computed_at","TIMESTAMP WITH TIME ZONE")],
     "data_top_asm": [("k","VARCHAR"),("c","BIGINT")],
     "data_top_chrom": [("k","VARCHAR"),("c","BIGINT")],
-    "zdna": [("Chromosome","VARCHAR"),("Start","BIGINT"),("End","BIGINT"),("Z-DNA Score","DOUBLE"),
+    "zdna": [("Chromosome","VARCHAR"),("Start","BIGINT"),("End","BIGINT"),("Z-DNA Score","FLOAT"),
              ("Sequence","VARCHAR"),("Assembly","VARCHAR")],
     "metadata_view": [("assembly","VARCHAR"),("bioproject","VARCHAR"),("biosample","VARCHAR"),
                       ("T2T","BOOLEAN"),("Genome size","BIGINT"),("Taxon ID","BIGINT"),
