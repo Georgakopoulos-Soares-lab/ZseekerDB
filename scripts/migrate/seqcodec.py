@@ -52,8 +52,10 @@ def _is_pure_acgt(raw: bytes) -> bool:
     return bool(raw) and max(raw.translate(_ENC_TR)) < 4
 
 
-def encode(s: str) -> bytes:
-    """Encode a sequence string to a compact, lossless BLOB (bytes)."""
+def encode(s: str):
+    """Encode a sequence string to a compact, lossless BLOB (bytes). NULL -> None."""
+    if s is None:
+        return None
     raw = s.encode("utf-8")
     if _is_pure_acgt(raw):
         codes = raw.translate(_ENC_TR)  # bytes valued 0..3
@@ -68,8 +70,10 @@ def encode(s: str) -> bytes:
     return b"\x01" + raw
 
 
-def decode(b: bytes) -> str:
-    """Decode a BLOB produced by encode() back to the exact original string."""
+def decode(b: bytes):
+    """Decode a BLOB produced by encode() back to the exact original string. None -> None."""
+    if b is None:
+        return None
     if not b:
         return ""
     tag = b[0]
@@ -93,6 +97,9 @@ def encode_batch(seqs):
         return [encode(s) for s in seqs]
     out = []
     for s in seqs:
+        if s is None:
+            out.append(None)
+            continue
         raw = s.encode("utf-8")
         if _is_pure_acgt(raw):
             a = np.frombuffer(raw.translate(_ENC_TR), dtype=np.uint8)

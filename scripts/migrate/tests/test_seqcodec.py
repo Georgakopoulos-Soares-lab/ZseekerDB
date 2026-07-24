@@ -21,6 +21,13 @@ def test_empty():
     assert sc.decode(sc.encode("")) == ""
 
 
+def test_none_passthrough():
+    # NULL sequences (empty CSV field) must survive as None, not crash
+    assert sc.encode(None) is None
+    assert sc.decode(None) is None
+    assert sc.encode_batch([None, "ACGT", None]) == [None, sc.encode("ACGT"), None]
+
+
 def test_single_bases():
     for b in "ACGT":
         assert sc.decode(sc.encode(b)) == b, b
