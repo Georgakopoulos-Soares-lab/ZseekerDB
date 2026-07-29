@@ -74,12 +74,21 @@ export default function HelpDocs() {
           <>
             <Typography paragraph>
               The taxonomic treemap is <b>interactive</b>: click a rectangle to drill down
-              (<i>Superkingdom → Kingdom → Phylum → Species</i>). Use the breadcrumb to navigate
-              back. Colors use a blue palette and labels are white for high contrast.
+              one available rank at a time (<i>Superkingdom → Kingdom → Phylum → Class → Order
+              → Family → Genus → Species</i>). Viral lineages also include <i>Viral realm</i>.
+              Missing ranks are shown as explicit <i>Unclassified …</i> nodes. Use the complete
+              breadcrumb path to navigate back; each tooltip identifies the node rank and reports
+              assembly and unique-taxid counts separately.
             </Typography>
             <Typography variant="body2" color="text.secondary">
               Tip: For very large categories, the treemap shows only the <b>Top‑30</b> nodes per
               level so it remains readable.
+            </Typography>
+            <Typography paragraph sx={{ mt: 2 }}>
+              Group-level Z-DNA/-RNA density summaries use a two-stage taxid-balanced mean.
+              Assembly densities are first averaged within each taxonomy identifier; those
+              per-taxid means are then averaged within the displayed taxonomic group. Each unique
+              taxid therefore contributes equally, regardless of its assembly or strain count.
             </Typography>
           </>
         ),

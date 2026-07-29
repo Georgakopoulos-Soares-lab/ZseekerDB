@@ -23,6 +23,7 @@ import DownloadIcon from '@mui/icons-material/Download';
 import ReactECharts from 'echarts-for-react';
 import { useSearchParams } from 'react-router-dom';
 import { useDebounce } from '../hooks/useDebounce';
+import { VIZ_FONT, VIZ_MUI_FONT } from '../utils/visualizationTypography';
 
 /* ------------------------------- Types/Helpers ------------------------------ */
 
@@ -71,7 +72,13 @@ function FullWidthChart({
   return (
     <ReactECharts
       ref={ref}
-      option={option}
+      option={{
+        ...option,
+        textStyle: {
+          ...((option.textStyle ?? {}) as Record<string, unknown>),
+          fontSize: VIZ_FONT.base,
+        },
+      }}
       style={{ height, width: '100%' }}
       opts={{ renderer: 'svg' }}
       notMerge={true}
@@ -624,7 +631,7 @@ export default function Explorer() {
     () => ({
       backgroundColor: tooltipBg,
       textStyle: {
-        fontSize: 11,
+        fontSize: VIZ_FONT.compactTooltip,
         color: tooltipText,
       },
       padding: [6, 8],
@@ -665,7 +672,7 @@ export default function Explorer() {
           rich: {
             sub: {
               color: axisNameColor,
-              fontSize: 7,
+              fontSize: VIZ_FONT.subscript,
               verticalAlign: 'bottom',
               padding: [6, 0, 0, 0],
             },
@@ -1259,11 +1266,21 @@ export default function Explorer() {
     {/* Row 1 */}
     <Grid container spacing={2} sx={{ mb: 2 }}>
       <Grid item xs={12} md={6} sx={{ width: '45%' }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Z-DNA Score — Histogram</Typography>
+        <Typography
+          variant="subtitle2"
+          sx={{ mb: 1, fontSize: VIZ_MUI_FONT.sectionTitle }}
+        >
+          Z-DNA Score — Histogram
+        </Typography>
         <FullWidthChart option={histOpt} height={400} deps={[tab, histOpt]} />
       </Grid>
       <Grid item xs={12} md={6} sx={{ width: '45%' }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Genomic Distribution</Typography>
+        <Typography
+          variant="subtitle2"
+          sx={{ mb: 1, fontSize: VIZ_MUI_FONT.sectionTitle }}
+        >
+          Genomic Distribution
+        </Typography>
         {genomicDistOpt ? (
           <FullWidthChart option={genomicDistOpt} height={400} deps={[tab, genomicDistOpt]} />
         ) : (
@@ -1285,7 +1302,12 @@ export default function Explorer() {
     {/* Row 2 */}
     <Grid container spacing={2} sx={{ mb: 2 }}>
       <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Length vs Z-DNA Score (limited sample)</Typography>
+        <Typography
+          variant="subtitle2"
+          sx={{ mb: 1, fontSize: VIZ_MUI_FONT.sectionTitle }}
+        >
+          Length vs Z-DNA Score (limited sample)
+        </Typography>
         {lenScoreOpt ? (
           <FullWidthChart option={lenScoreOpt} height={400} deps={[tab, lenScoreOpt]} />
         ) : (
@@ -1293,7 +1315,12 @@ export default function Explorer() {
         )}
       </Grid>
       <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Z-DNA Score — per Chromosome (top by median)</Typography>
+        <Typography
+          variant="subtitle2"
+          sx={{ mb: 1, fontSize: VIZ_MUI_FONT.sectionTitle }}
+        >
+          Z-DNA Score — per Chromosome (top by median)
+        </Typography>
         {boxOpt ? (
           <FullWidthChart option={boxOpt} height={400} deps={[tab, boxOpt]} />
         ) : (
@@ -1305,7 +1332,12 @@ export default function Explorer() {
     {/* Row 3 */}
     <Grid container spacing={2}>
       <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Z-DNA Density per 100 kb {chr ? `— ${chr}` : '(select chromosome)'}</Typography>
+        <Typography
+          variant="subtitle2"
+          sx={{ mb: 1, fontSize: VIZ_MUI_FONT.sectionTitle }}
+        >
+          Z-DNA Density per 100 kb {chr ? `— ${chr}` : '(select chromosome)'}
+        </Typography>
         {densityOpt ? (
           <FullWidthChart option={densityOpt} height={400} deps={[tab, chr, densityOpt]} />
         ) : (
@@ -1313,7 +1345,12 @@ export default function Explorer() {
         )}
       </Grid>
       <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Z-DNA Score across Genomic Positions {chr ? `— ${chr}` : '(select chromosome)'}</Typography>
+        <Typography
+          variant="subtitle2"
+          sx={{ mb: 1, fontSize: VIZ_MUI_FONT.sectionTitle }}
+        >
+          Z-DNA Score across Genomic Positions {chr ? `— ${chr}` : '(select chromosome)'}
+        </Typography>
         {scatterOpt ? (
           <FullWidthChart option={scatterOpt} height={400} deps={[tab, chr, scatterOpt]} />
         ) : (
@@ -1354,5 +1391,3 @@ function naturalSort(a: string, b: string) {
     
     return partsA.length - partsB.length;
 }
-
-

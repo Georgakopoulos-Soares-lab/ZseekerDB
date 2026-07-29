@@ -5,6 +5,7 @@ import {
 } from '@mui/material';
 import ReactECharts from 'echarts-for-react';
 import type { EChartsOption } from 'echarts';
+import { VIZ_FONT, VIZ_MUI_FONT } from '../utils/visualizationTypography';
 
 type DonutField = 'class' | 'kingdom' | 'phylum' | 'superkingdom';
 
@@ -52,9 +53,9 @@ export default function Visualizations() {
     try {
       const a = await fetch(`/api/metadata/classes/top?limit=12&field=${field}`).then(r => r.json());
       const labels = Array.isArray(a.labels) ? a.labels
-                    : (a.rows || []).map((x: any) => x.class);
+        : (a.rows || []).map((x: any) => x.class);
       const values = Array.isArray(a.values) ? a.values.map(Number)
-                    : (a.rows || []).map((x: any) => Number(x.n || 0));
+        : (a.rows || []).map((x: any) => Number(x.n || 0));
       setDonutLabels(labels);
       setDonutValues(values);
     } finally {
@@ -68,9 +69,9 @@ export default function Visualizations() {
     try {
       const res = await fetch(`/api/zdna/score_histogram?bin=${b}&approx=${ap ? 1 : 0}`).then(r => r.json());
       const labels = Array.isArray(res.labels) ? res.labels.map(String)
-                    : (res.bins || []).map((x: any) => String(x.bin_start));
+        : (res.bins || []).map((x: any) => String(x.bin_start));
       const values = Array.isArray(res.values) ? res.values.map(Number)
-                    : (res.bins || []).map((x: any) => Number(x.n || 0));
+        : (res.bins || []).map((x: any) => Number(x.n || 0));
       setHistLabels(labels);
       setHistValues(values);
     } finally {
@@ -80,11 +81,12 @@ export default function Visualizations() {
   React.useEffect(() => { fetchHistogram(bin, approx); }, [bin, approx, fetchHistogram]);
 
   // ---- ECharts options ----
-  const titleCase = (s: string) => s.slice(0,1).toUpperCase() + s.slice(1);
+  const titleCase = (s: string) => s.slice(0, 1).toUpperCase() + s.slice(1);
 
   const donutOption: EChartsOption = {
-    tooltip: { trigger: 'item' },
-    legend: { top: 'bottom' },
+    textStyle: { fontSize: VIZ_FONT.base },
+    tooltip: { trigger: 'item', textStyle: { fontSize: VIZ_FONT.defaultTooltip } },
+    legend: { top: 'bottom', textStyle: { fontSize: VIZ_FONT.base } },
     series: [
       {
         name: `${titleCase(donutField)} count`,
@@ -92,7 +94,9 @@ export default function Visualizations() {
         radius: ['50%', '75%'],
         avoidLabelOverlap: true,
         label: { show: false },
-        emphasis: { label: { show: true, fontSize: 12, formatter: '{b}: {c}' } },
+        emphasis: {
+          label: { show: true, fontSize: VIZ_FONT.base, formatter: '{b}: {c}' },
+        },
         data: donutLabels.map((name, i) => ({ name, value: donutValues[i] ?? 0 })),
       }
     ]
@@ -100,16 +104,35 @@ export default function Visualizations() {
 
   const step = Math.max(1, Math.ceil(histLabels.length / 24));
   const histOption: EChartsOption = {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    textStyle: { fontSize: VIZ_FONT.base },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      textStyle: { fontSize: VIZ_FONT.defaultTooltip },
+    },
     grid: { left: 40, right: 20, top: 20, bottom: 60 },
     dataZoom: [{ type: 'inside', xAxisIndex: 0 }, { type: 'slider', xAxisIndex: 0, height: 18 }],
     xAxis: {
       type: 'category',
       name: `Score (bin=${bin})`,
       data: histLabels,
-      axisLabel: { interval: (idx: number) => idx % step === 0, hideOverlap: true, rotate: histLabels.length > 40 ? 40 : 0 }
+      nameTextStyle: { fontSize: VIZ_FONT.base },
+      axisLabel: {
+        interval: (idx: number) => idx % step === 0,
+        hideOverlap: true,
+        rotate: histLabels.length > 40 ? 40 : 0,
+        fontSize: VIZ_FONT.base,
+      }
     },
-    yAxis: { type: 'value', name: 'Count', axisLabel: { formatter: (v: any) => Number(v).toLocaleString() } },
+    yAxis: {
+      type: 'value',
+      name: 'Count',
+      nameTextStyle: { fontSize: VIZ_FONT.base },
+      axisLabel: {
+        formatter: (v: any) => Number(v).toLocaleString(),
+        fontSize: VIZ_FONT.base,
+      },
+    },
     series: [{ name: 'Count', type: 'bar', data: histValues, large: true, largeThreshold: 1000, barMaxWidth: 12 }]
   };
 
@@ -118,7 +141,12 @@ export default function Visualizations() {
       {/* Donut */}
       <Paper elevation={1} sx={{ p: 2 }}>
         <Stack direction="row" alignItems="center" spacing={2} sx={{ mb: 1 }}>
-          <Typography variant="h6" sx={{ flex: 1 }}>Top classes (metadata)</Typography>
+          <Typography
+            variant="h6"
+            sx={{ flex: 1, fontSize: VIZ_MUI_FONT.cardTitle }}
+          >
+            Top classes (metadata)
+          </Typography>
           <FormControl size="small" sx={{ minWidth: 180 }}>
             <InputLabel id="donut-field-label">Field</InputLabel>
             <Select
@@ -144,7 +172,10 @@ export default function Visualizations() {
       {/* Histogram */}
       <Paper elevation={1} sx={{ p: 2 }}>
         <Stack direction="row" alignItems="center" spacing={2} sx={{ mb: 1 }}>
-          <Typography variant="h6" sx={{ mr: 2, flexShrink: 0 }}>
+          <Typography
+            variant="h6"
+            sx={{ mr: 2, flexShrink: 0, fontSize: VIZ_MUI_FONT.cardTitle }}
+          >
             Z-DNA Score histogram (server‑side)
           </Typography>
 

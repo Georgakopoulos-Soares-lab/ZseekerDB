@@ -144,6 +144,32 @@ type insightsCacheEntry struct {
 
 var insightsCached insightsCacheEntry
 
+const homeTopKingdomsQuery = `
+	WITH per_taxid AS (
+		SELECT
+			kingdom,
+			taxid,
+			AVG(TRY_CAST(obs_density_per_kb AS DOUBLE)) AS taxid_density,
+			COUNT(*) AS assembly_count,
+			COALESCE(MAX(superkingdom), '(unknown)') AS superkingdom
+		FROM metadata
+		WHERE kingdom IS NOT NULL AND kingdom <> ''
+		  AND taxid IS NOT NULL
+		  AND obs_density_per_kb IS NOT NULL
+		  AND genome_size >= 1000
+		GROUP BY kingdom, taxid
+	)
+	SELECT
+		kingdom AS label,
+		AVG(taxid_density) AS density,
+		SUM(assembly_count) AS assembly_count,
+		COUNT(*) AS unique_taxids,
+		COALESCE(MAX(superkingdom), '(unknown)') AS superkingdom
+	FROM per_taxid
+	GROUP BY kingdom
+	ORDER BY density DESC
+	LIMIT 10`
+
 // serveJSON writes JSON with optional gzip and browser-cache headers.
 func serveJSON(c *gin.Context, payload []byte) {
 	c.Header("Cache-Control", "public, max-age=900")
@@ -177,10 +203,11 @@ func (s *Server) homeInsights(c *gin.Context) {
 		N     float64 `json:"n"`
 	}
 	type TopKV struct {
-		Label        string  `json:"label"`
-		Density      float64 `json:"density"`
-		Cnt          int64   `json:"cnt"`
-		Superkingdom string  `json:"superkingdom"`
+		Label         string  `json:"label"`
+		Density       float64 `json:"density"`
+		AssemblyCount int64   `json:"assembly_count"`
+		UniqueTaxids  int64   `json:"unique_taxids"`
+		Superkingdom  string  `json:"superkingdom"`
 	}
 	type HistBin struct {
 		Bin float64 `json:"bin"`
@@ -198,19 +225,19 @@ func (s *Server) homeInsights(c *gin.Context) {
 		AvgGC           float64 `json:"avg_gc"`
 	}
 	type InsightsResponse struct {
-		KPIs         KPIs        `json:"kpis"`
-		Superkingdoms []KV       `json:"superkingdoms"`
-		TopKingdoms  []TopKV    `json:"top_kingdoms"`
-		Histogram    []HistBin   `json:"histogram"`
-		Scatter      []ScatterPt `json:"scatter"`
+		KPIs          KPIs        `json:"kpis"`
+		Superkingdoms []KV        `json:"superkingdoms"`
+		TopKingdoms   []TopKV     `json:"top_kingdoms"`
+		Histogram     []HistBin   `json:"histogram"`
+		Scatter       []ScatterPt `json:"scatter"`
 	}
 
 	var (
-		kpis    KPIs
-		skRows  []KV
-		topRows []TopKV
+		kpis     KPIs
+		skRows   []KV
+		topRows  []TopKV
 		histRows []HistBin
-		scRows  []ScatterPt
+		scRows   []ScatterPt
 	)
 
 	// Run all five queries concurrently — total wall-time ≈ slowest query, not sum.
@@ -258,15 +285,7 @@ func (s *Server) homeInsights(c *gin.Context) {
 	})
 
 	g.Go(func() error {
-		rows, err := s.db.Query(`
-			SELECT kingdom AS label,
-			       AVG(TRY_CAST(obs_density_per_kb AS DOUBLE)) AS density,
-			       COUNT(*) AS cnt,
-			       COALESCE(MAX(superkingdom),'(unknown)') AS superkingdom
-			FROM metadata
-			WHERE kingdom IS NOT NULL AND kingdom <> ''
-			  AND obs_density_per_kb IS NOT NULL AND genome_size >= 1000
-			GROUP BY 1 ORDER BY density DESC LIMIT 10`)
+		rows, err := s.db.Query(homeTopKingdomsQuery)
 		if err != nil {
 			return err
 		}
@@ -274,7 +293,13 @@ func (s *Server) homeInsights(c *gin.Context) {
 		for rows.Next() {
 			var t TopKV
 			var density sql.NullFloat64
-			if err := rows.Scan(&t.Label, &density, &t.Cnt, &t.Superkingdom); err != nil {
+			if err := rows.Scan(
+				&t.Label,
+				&density,
+				&t.AssemblyCount,
+				&t.UniqueTaxids,
+				&t.Superkingdom,
+			); err != nil {
 				return err
 			}
 			t.Density = density.Float64
@@ -353,11 +378,11 @@ func (s *Server) homeInsights(c *gin.Context) {
 	}
 
 	resp := InsightsResponse{
-		KPIs:         kpis,
+		KPIs:          kpis,
 		Superkingdoms: skRows,
-		TopKingdoms:  topRows,
-		Histogram:    histRows,
-		Scatter:      scRows,
+		TopKingdoms:   topRows,
+		Histogram:     histRows,
+		Scatter:       scRows,
 	}
 	payload, err := json.Marshal(resp)
 	if err != nil {

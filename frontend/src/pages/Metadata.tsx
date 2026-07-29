@@ -36,6 +36,8 @@ import { ColumnVisibilityMenu } from '../components/ColumnVisibilityMenu';
 import BasicTaxonomy from '../components/BasicTaxonomy';
 import { METADATA_COLUMNS } from '../components/DataTable';
 import { useTheme } from '@mui/material/styles';
+import { taxidBalancedGroupMeans } from '../utils/taxidAverages';
+import { VIZ_FONT } from '../utils/visualizationTypography';
 
 // ---------------- helpers ----------------
 
@@ -55,10 +57,6 @@ type Ranges = {
   gc_percent_min: number | '';
   gc_percent_max: number | '';
 };
-
-// Case-insensitive finder on an array of column strings
-const findCol = (cols: string[], nameLower: string) =>
-  cols.find((c) => c.toLowerCase() === nameLower) ?? null;
 
 // Build a simple histogram (equal bins)
 function buildHistogram(values: number[], binCount = 20) {
@@ -494,6 +492,7 @@ export default function MetadataPage() {
   const colGC = useMemo(() => findColSmart(vizCols, 'gc_percent'), [vizCols]);
   const colGSize = useMemo(() => findColSmart(vizCols, 'genome_size'), [vizCols]);
   const colSK = useMemo(() => findColSmart(vizCols, 'superkingdom'), [vizCols]);
+  const colTaxid = useMemo(() => findColSmart(vizCols, 'taxid'), [vizCols]);
   const colTaxName = useMemo(() => findColSmart(vizCols, 'tax_name'), [vizCols]);
   const colAssembly = useMemo(() => findColSmart(vizCols, 'assembly'), [vizCols]);
 
@@ -503,23 +502,35 @@ export default function MetadataPage() {
     [vizCols]
   );
 
-  // 1) Top Genera by avg Z-DNA density (bar)
+  // 1) Top genera by taxid-balanced mean Z-DNA density (bar)
   const genusBar = useMemo(() => {
-    if (!vizDensityCol || !colGenus) return { cats: [] as string[], vals: [] as number[] };
-    const agg = new Map<string, { sum: number; n: number }>();
-    for (const r of vizRows) {
-      const g = String(r[colGenus] ?? '').trim() || '(unknown)';
-      const d = Number(r[vizDensityCol]);
-      if (!Number.isFinite(d)) continue;
-      const a = agg.get(g) ?? { sum: 0, n: 0 };
-      a.sum += d; a.n += 1;
-      agg.set(g, a);
+    if (!vizDensityCol || !colGenus || !colTaxid) {
+      return {
+        cats: [] as string[],
+        values: [] as {
+          value: number;
+          assemblyCount: number;
+          uniqueTaxids: number;
+        }[],
+      };
     }
-    const rowsAgg = Array.from(agg.entries()).map(([g, a]) => ({ g, avg: a.sum / Math.max(1, a.n) }));
-    rowsAgg.sort((a, b) => b.avg - a.avg);
+
+    const rowsAgg = taxidBalancedGroupMeans(vizRows, {
+      groupColumn: colGenus,
+      taxidColumn: colTaxid,
+      valueColumn: vizDensityCol,
+    });
+    rowsAgg.sort((a, b) => b.mean - a.mean);
     const top = rowsAgg.slice(0, TOP_N_GENUS);
-    return { cats: top.map(x => x.g), vals: top.map(x => Number(x.avg.toFixed(2))) };
-  }, [vizRows, vizDensityCol, colGenus]);
+    return {
+      cats: top.map(x => x.group),
+      values: top.map(x => ({
+        value: Number(x.mean.toFixed(2)),
+        assemblyCount: x.assemblyCount,
+        uniqueTaxids: x.uniqueTaxids,
+      })),
+    };
+  }, [vizRows, vizDensityCol, colGenus, colTaxid]);
 
   // dynamic bottom + height για το bar των genera
   const genusBottomPad = useMemo(
@@ -533,20 +544,41 @@ export default function MetadataPage() {
   );
 
   const genusBarOption = useMemo(() => ({
+    textStyle: { fontSize: VIZ_FONT.base },
     title: {
-      text: 'Top Genera by avg Z-DNA density (/kb)',
+      text: 'Taxid-balanced mean density by genus (/kb)',
       left: 'center',
-      textStyle: { color: axisTextColor },
+      textStyle: { color: axisTextColor, fontSize: VIZ_FONT.title },
     },
-    tooltip: { trigger: 'axis' },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: any) => {
+        const point = params[0];
+        const data = point?.data ?? {};
+        return [
+          point?.name ?? '',
+          `Taxid-balanced mean density: ${Number(point?.value ?? 0).toFixed(2)} /kb`,
+          `Assemblies: ${Number(data.assemblyCount ?? 0).toLocaleString()}`,
+          `Unique taxids: ${Number(data.uniqueTaxids ?? 0).toLocaleString()}`,
+        ].join('<br/>');
+      },
+      textStyle: { fontSize: VIZ_FONT.defaultTooltip },
+    },
     xAxis: {
       type: 'category',
       data: genusBar.cats,
-      axisLabel: { rotate: 35, margin: 16, color: axisTextColor },
+      axisLabel: {
+        rotate: 35,
+        margin: 16,
+        color: axisTextColor,
+        fontSize: VIZ_FONT.base,
+        overflow: 'truncate',
+        width: 120,
+      },
       name: 'Genus',
       nameLocation: 'middle',
       nameGap: 130,
-      nameTextStyle: { color: axisTextColor },
+      nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
       axisLine: { lineStyle: { color: axisLineColor } },
     },
     yAxis: {
@@ -554,14 +586,14 @@ export default function MetadataPage() {
       name: 'avg density (/kb)',
       nameLocation: 'middle',
       nameGap: 45,
-      axisLabel: { margin: 12, color: axisTextColor },
-      nameTextStyle: { color: axisTextColor },
+      axisLabel: { margin: 12, color: axisTextColor, fontSize: VIZ_FONT.base },
+      nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
       axisLine: { lineStyle: { color: axisLineColor } },
       splitLine: { lineStyle: { color: gridLineColor } },
     },
     series: [{
       type: 'bar',
-      data: genusBar.vals,
+      data: genusBar.values,
       itemStyle: { color: CHART_PALETTES.genusBar[0] }
     }],
     grid: { left: 60, right: 20, top: 50, bottom: genusBottomPad }
@@ -620,11 +652,12 @@ export default function MetadataPage() {
   }, [scatterData, skCats, bubbleSizer]);
 
   const scatterOption = useMemo(() => ({
+    textStyle: { fontSize: VIZ_FONT.base },
     // δεν χρειάζεται color εδώ, τα δίνουμε per-series
     title: {
       text: 'GC% vs Z-DNA density (/kb)',
       left: 'center',
-      textStyle: { color: axisTextColor },
+      textStyle: { color: axisTextColor, fontSize: VIZ_FONT.title },
     },
     tooltip: {
       trigger: 'item',
@@ -634,19 +667,20 @@ export default function MetadataPage() {
           Number.isFinite(sz) ? `<br/>Genome size: ${Math.round(sz)}` : ''
         }`;
       },
+      textStyle: { fontSize: VIZ_FONT.defaultTooltip },
     },
     legend: {
       top: 28,
       data: skCats,
-      textStyle: { color: axisTextColor },
+      textStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
     },
     xAxis: {
       type: 'value',
       name: 'GC %',
       nameLocation: 'middle',
       nameGap: 45,
-      axisLabel: { margin: 12, color: axisTextColor },
-      nameTextStyle: { color: axisTextColor },
+      axisLabel: { margin: 12, color: axisTextColor, fontSize: VIZ_FONT.base },
+      nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
       axisLine: { lineStyle: { color: axisLineColor } },
     },
     yAxis: {
@@ -654,8 +688,8 @@ export default function MetadataPage() {
       name: 'Z-DNA density (/kb)',
       nameLocation: 'middle',
       nameGap: 45,
-      axisLabel: { margin: 12, color: axisTextColor },
-      nameTextStyle: { color: axisTextColor },
+      axisLabel: { margin: 12, color: axisTextColor, fontSize: VIZ_FONT.base },
+      nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
       axisLine: { lineStyle: { color: axisLineColor } },
       splitLine: { lineStyle: { color: gridLineColor } },
     },
@@ -687,13 +721,14 @@ const histGenomeBottom = useMemo(
 
   const histGenomeOption = useMemo(() => {
     return {
+      textStyle: { fontSize: VIZ_FONT.base },
       color: CHART_PALETTES.histGenome,
       title: {
         text: 'Genome Size distribution',
         left: 'center',
-        textStyle: { color: axisTextColor },
+        textStyle: { color: axisTextColor, fontSize: VIZ_FONT.title },
       },
-      tooltip: { trigger: 'axis' },
+      tooltip: { trigger: 'axis', textStyle: { fontSize: VIZ_FONT.defaultTooltip } },
       xAxis: {
         type: 'category',
         data: histGenome.labels,
@@ -704,14 +739,14 @@ const histGenomeBottom = useMemo(
           width: 80,
           overflow: 'break',
           lineHeight: 12,
-          fontSize: 9,
+          fontSize: VIZ_FONT.histogramCompact,
           hideOverlap: true,
           color: axisTextColor,
         },
         name: 'Genome size',
         nameLocation: 'middle',
         nameGap: 120,
-        nameTextStyle: { color: axisTextColor },
+        nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
         axisLine: { lineStyle: { color: axisLineColor } },
       },
       yAxis: {
@@ -719,8 +754,8 @@ const histGenomeBottom = useMemo(
         name: 'Count',
         nameLocation: 'middle',
         nameGap: 45,
-        axisLabel: { margin: 12, color: axisTextColor },
-        nameTextStyle: { color: axisTextColor },
+        axisLabel: { margin: 12, color: axisTextColor, fontSize: VIZ_FONT.base },
+        nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
         axisLine: { lineStyle: { color: axisLineColor } },
         splitLine: { lineStyle: { color: gridLineColor } },
       },
@@ -748,13 +783,14 @@ const histGenomeBottom = useMemo(
 
   const histGCOption = useMemo(() => {
     return {
+      textStyle: { fontSize: VIZ_FONT.base },
       color: CHART_PALETTES.histGC,
       title: {
         text: 'GC% distribution',
         left: 'center',
-        textStyle: { color: axisTextColor },
+        textStyle: { color: axisTextColor, fontSize: VIZ_FONT.title },
       },
-      tooltip: { trigger: 'axis' },
+      tooltip: { trigger: 'axis', textStyle: { fontSize: VIZ_FONT.defaultTooltip } },
       xAxis: {
         type: 'category',
         data: histGC.labels,
@@ -766,11 +802,12 @@ const histGenomeBottom = useMemo(
           overflow: 'break',
           lineHeight: 14,
           color: axisTextColor,
+          fontSize: VIZ_FONT.base,
         },
         name: 'GC %',
         nameLocation: 'middle',
         nameGap: 60,
-        nameTextStyle: { color: axisTextColor },
+        nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
         axisLine: { lineStyle: { color: axisLineColor } },
       },
       yAxis: {
@@ -778,8 +815,8 @@ const histGenomeBottom = useMemo(
         name: 'Count',
         nameLocation: 'middle',
         nameGap: 45,
-        axisLabel: { margin: 12, color: axisTextColor },
-        nameTextStyle: { color: axisTextColor },
+        axisLabel: { margin: 12, color: axisTextColor, fontSize: VIZ_FONT.base },
+        nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
         axisLine: { lineStyle: { color: axisLineColor } },
         splitLine: { lineStyle: { color: gridLineColor } },
       },
@@ -1132,7 +1169,7 @@ const histGenomeBottom = useMemo(
               </Box>
             ) : (
               <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' } }}>
-                {/* 1) Top Genera by avg density */}
+                {/* 1) Top genera by taxid-balanced mean density */}
                 <Paper variant="outlined" sx={{ p: 1 }}>
                   {genusBar.cats.length > 0 ? (
                     <ReactECharts option={genusBarOption} style={{ height: genusChartHeight }} />
