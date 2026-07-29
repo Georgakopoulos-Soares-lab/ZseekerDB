@@ -440,7 +440,7 @@ const DownloadDataset: FC = () => {
                           sx={{
                             textTransform: 'none',
                             mb: 1,
-                            fontSize: '0.8rem',
+                            fontSize: '1rem',
                           }}
                         >
                           {d.label}

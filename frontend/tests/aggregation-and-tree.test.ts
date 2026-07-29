@@ -11,6 +11,10 @@ import {
   VIZ_FONT,
   VIZ_MUI_FONT,
 } from '../src/utils/visualizationTypography.ts';
+import {
+  APP_FONT_SCALE,
+  MUI_BASE_FONT_SIZE,
+} from '../src/utils/typographyScale.ts';
 
 test('taxid-balanced means give multiple assemblies from one taxid one vote', () => {
   const rows = [
@@ -99,7 +103,9 @@ test('missing ranks are explicit and viral realm is part of viral navigation', (
   assert.equal(child(phylum, 'Unclassified class').rank, 'Class');
 });
 
-test('visualization typography constants are exactly 1.25x their prior sizes', () => {
+test('application and visualization typography are exactly 1.25x their prior sizes', () => {
+  assert.equal(APP_FONT_SCALE, 1.25);
+  assert.equal(MUI_BASE_FONT_SIZE, 14 * 1.25);
   assert.equal(VIZ_FONT.base, 12 * 1.25);
   assert.equal(VIZ_FONT.defaultTooltip, 14 * 1.25);
   assert.equal(VIZ_FONT.title, 18 * 1.25);

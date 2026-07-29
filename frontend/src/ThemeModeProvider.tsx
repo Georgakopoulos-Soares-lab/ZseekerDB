@@ -2,6 +2,7 @@ import * as React from 'react';
 import { ThemeProvider, createTheme, CssBaseline } from '@mui/material';
 import { alpha } from '@mui/material/styles';
 import type { PaletteMode } from '@mui/material'; // <- type-only import (σημαντικό)
+import { MUI_BASE_FONT_SIZE } from './utils/typographyScale';
 
 type Ctx = { mode: PaletteMode; toggle: () => void };
 export const ColorModeContext = React.createContext<Ctx>({ mode: 'dark', toggle: () => {} });
@@ -10,6 +11,11 @@ export const useColorMode = () => React.useContext(ColorModeContext);
 function getTheme(mode: PaletteMode) {
   const isLight = mode === 'light';
   return createTheme({
+    // MUI's default is 14px. Raising the theme base to 17.5px scales every
+    // inherited application font—navigation, forms, tables, pages, and dialogs.
+    typography: {
+      fontSize: MUI_BASE_FONT_SIZE,
+    },
     palette: {
       mode,
       primary: { main: isLight ? '#1976d2' : '#90caf9' },   // blue accent
