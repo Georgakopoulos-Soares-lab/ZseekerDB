@@ -15,6 +15,10 @@ import {
   APP_FONT_SCALE,
   MUI_BASE_FONT_SIZE,
 } from '../src/utils/typographyScale.ts';
+import {
+  TREEMAP_MIN_VISIBLE_AREA,
+  TREEMAP_SERIES_BOUNDS,
+} from '../src/utils/treemapLayout.ts';
 
 test('taxid-balanced means give multiple assemblies from one taxid one vote', () => {
   const rows = [
@@ -115,4 +119,12 @@ test('application and visualization typography are exactly 1.25x their prior siz
   assert.equal(VIZ_FONT.subscript, 7 * 1.25);
   assert.equal(VIZ_MUI_FONT.pageTitle, '1.875rem');
   assert.equal(VIZ_MUI_FONT.sectionTitle, '1.09375rem');
+});
+
+test('treemap reserves an inset on every edge and paints very small groups', () => {
+  assert.ok(TREEMAP_SERIES_BOUNDS.left > 0);
+  assert.ok(TREEMAP_SERIES_BOUNDS.right > 0);
+  assert.ok(TREEMAP_SERIES_BOUNDS.top > 0);
+  assert.ok(TREEMAP_SERIES_BOUNDS.bottom > 0);
+  assert.equal(TREEMAP_MIN_VISIBLE_AREA, 1);
 });

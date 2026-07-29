@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Box,
   Paper,
@@ -12,6 +12,10 @@ import {
   type TaxonomyTreeRow,
   type TreeNode,
 } from '../utils/taxonomyTree';
+import {
+  TREEMAP_MIN_VISIBLE_AREA,
+  TREEMAP_SERIES_BOUNDS,
+} from '../utils/treemapLayout';
 import { VIZ_FONT, VIZ_MUI_FONT } from '../utils/visualizationTypography';
 
 /* =============================================================================
@@ -126,6 +130,8 @@ export default function MetadataStats() {
 
   // treemap data
   const [treeData, setTreeData] = useState<TreeNode[]>([]);
+  const treemapChartRef = useRef<ReactECharts>(null);
+  const treemapContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -274,6 +280,28 @@ export default function MetadataStats() {
 
   const hasData = useMemo(() => !loading && !error, [loading, error]);
 
+  useEffect(() => {
+    const container = treemapContainerRef.current;
+    if (!hasData || !container) return;
+
+    let frame = 0;
+    const resizeTreemap = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        treemapChartRef.current?.getEchartsInstance().resize();
+      });
+    };
+
+    const observer = new ResizeObserver(resizeTreemap);
+    observer.observe(container);
+    resizeTreemap();
+
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(frame);
+    };
+  }, [hasData]);
+
   const avgGenomeText =
     typeof avgGenome === 'number' && Number.isFinite(avgGenome)
       ? avgGenome.toLocaleString('en-US', {
@@ -315,9 +343,12 @@ export default function MetadataStats() {
       name: 'Taxonomy',
       type: 'treemap',
       data: treeData,
+      ...TREEMAP_SERIES_BOUNDS,
       leafDepth: 1,
       nodeClick: 'zoomToNode',
       roam: false,
+      visibleMin: TREEMAP_MIN_VISIBLE_AREA,
+      childrenVisibleMin: TREEMAP_MIN_VISIBLE_AREA,
       squareRatio: 0.9,
       colorMappingBy: 'index',
 
@@ -445,13 +476,13 @@ export default function MetadataStats() {
         <Box
           sx={{
             display: 'grid',
-            gridTemplateColumns: { xs: '1fr', lg: '1fr 340px' },
+            gridTemplateColumns: { xs: 'minmax(0, 1fr)', lg: 'minmax(0, 1fr) 340px' },
             alignItems: 'start',
             gap: 2
           }}
         >
           {/* --------------------------- ΚΕΝΤΡΙΚΗ ΠΕΡΙΟΧΗ --------------------------- */}
-          <Box>
+          <Box sx={{ minWidth: 0, width: '100%' }}>
             {/* KPIs πάνω από το treemap (2 σειρές, ίσο μέγεθος) */}
 
 
@@ -687,14 +718,20 @@ export default function MetadataStats() {
 
             {/* Treemap με διαφανές background & τετράγωνο layout */}
             <Box
+              ref={treemapContainerRef}
+              data-testid="taxonomy-treemap-container"
               sx={{
                 mx: 'auto',
-                width: { xs: 'min(95vw, 70vh)', md: 'min(100%, 70vh)' },
+                width: '100%',
+                maxWidth: '70vh',
+                minWidth: 0,
                 aspectRatio: '1 / 1',
                 bgcolor: 'transparent',
+                overflow: 'hidden',
               }}
             >
               <ReactECharts
+                ref={treemapChartRef}
                 style={{ width: '100%', height: '100%' }}
                 option={treemapOption}
                 notMerge={true}                // <-- σημαντικό
