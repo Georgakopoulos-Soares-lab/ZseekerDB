@@ -19,6 +19,7 @@ import {
   TREEMAP_MIN_VISIBLE_AREA,
   TREEMAP_SERIES_BOUNDS,
 } from '../src/utils/treemapLayout.ts';
+import { GENOME_GC_SCATTER_LAYOUT } from '../src/utils/chartLayout.ts';
 
 test('taxid-balanced means give multiple assemblies from one taxid one vote', () => {
   const rows = [
@@ -127,4 +128,11 @@ test('treemap reserves an inset on every edge and paints very small groups', () 
   assert.ok(TREEMAP_SERIES_BOUNDS.top > 0);
   assert.ok(TREEMAP_SERIES_BOUNDS.bottom > 0);
   assert.equal(TREEMAP_MIN_VISIBLE_AREA, 1);
+});
+
+test('genome-GC scatter leaves room between its y-axis title and tick labels', () => {
+  assert.ok(GENOME_GC_SCATTER_LAYOUT.gridLeft >= 100);
+  assert.ok(GENOME_GC_SCATTER_LAYOUT.yAxisNameGap >= 70);
+  assert.ok(GENOME_GC_SCATTER_LAYOUT.yAxisLabelMargin >= 10);
+  assert.ok(GENOME_GC_SCATTER_LAYOUT.yAxisSplitNumber <= 5);
 });

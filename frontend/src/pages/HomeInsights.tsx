@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Box, Grid, Paper, Typography, CircularProgress } from '@mui/material';
 import ReactECharts from 'echarts-for-react';
 import { useTheme } from '@mui/material/styles';
+import { GENOME_GC_SCATTER_LAYOUT } from '../utils/chartLayout';
 import { VIZ_FONT, VIZ_MUI_FONT } from '../utils/visualizationTypography';
 
 const fmtNum = (n: number | null | undefined) =>
@@ -244,7 +245,7 @@ export default function HomeInsights() {
         textStyle: { fontSize: VIZ_FONT.defaultTooltip },
       },
       grid: {
-        left: 80,
+        left: GENOME_GC_SCATTER_LAYOUT.gridLeft,
         right: 20,
         top: 30,
         bottom: 110,
@@ -281,10 +282,13 @@ export default function HomeInsights() {
         type: 'value',
         name: 'GC (%)',
         nameLocation: 'middle',
-        nameGap: 50,
+        nameGap: GENOME_GC_SCATTER_LAYOUT.yAxisNameGap,
+        splitNumber: GENOME_GC_SCATTER_LAYOUT.yAxisSplitNumber,
         nameTextStyle: { color: axisNameColor, fontSize: VIZ_FONT.base },
         axisLabel: {
           formatter: (v: number) => fmtNum(Number(v)),
+          margin: GENOME_GC_SCATTER_LAYOUT.yAxisLabelMargin,
+          hideOverlap: true,
           color: axisLabelColor,
           fontSize: VIZ_FONT.base,
         }
