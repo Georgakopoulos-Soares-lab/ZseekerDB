@@ -724,16 +724,18 @@ func (s *Server) metadataExport(c *gin.Context) {
 
 	w := csv.NewWriter(c.Writer)
 	_ = w.Write(getMetadataColumns())
-	vals := make([]any, len(cols))
-	ptrs := make([]any, len(cols))
+	// Sized by the SELECT list, not the table: metadata has more columns than are exported.
+	vals := make([]any, len(metadataColumns))
+	ptrs := make([]any, len(vals))
 	for i := range vals {
 		ptrs[i] = &vals[i]
 	}
 	for rows.Next() {
 		if err := rows.Scan(ptrs...); err != nil {
+			log.Println("metadataExport scan error:", err)
 			break
 		}
-		rec := make([]string, len(cols))
+		rec := make([]string, len(vals))
 		for i, v := range vals {
 			if b, ok := v.([]byte); ok {
 				rec[i] = string(b)
@@ -1146,19 +1148,20 @@ func (s *Server) zdnaScoreHistogram(c *gin.Context) {
 		where = " WHERE " + strings.Join(whereParts, " AND ")
 	}
 
+	// DuckDB samples the FROM output before WHERE and rejects USING SAMPLE directly after
+	// FROM when WHERE/GROUP BY follow, so filter in a subquery and sample its rows.
 	buildSQL := func(withSample bool) string {
-		fc := "FROM data"
+		src := `(SELECT "Z-DNA Score" AS score FROM data` + where + `)`
 		if withSample && sampleRows > 0 {
-			fc = fmt.Sprintf("FROM data USING SAMPLE %d ROWS", sampleRows)
+			src = fmt.Sprintf("(SELECT * FROM %s f USING SAMPLE %d ROWS)", src, sampleRows)
 		}
 		return fmt.Sprintf(`
-SELECT CAST(floor("Z-DNA Score" / %[1]d) * %[1]d AS INT) AS bin,
+SELECT CAST(floor(score / %[1]d) * %[1]d AS INT) AS bin,
        COUNT(*) AS count
-%[2]s
-%[3]s
+FROM %[2]s s
 GROUP BY 1
 ORDER BY 1
-`, bin, fc, where)
+`, bin, src)
 	}
 	q := buildSQL(approx)
 	rows, err := s.db.Query(q, args...)
@@ -1250,15 +1253,14 @@ type metadataColumn struct {
 	Hidden bool   // Hidden by default in UI
 }
 
-// Column definitions in display order
+// Column definitions in display order. Labels must match METADATA_COLUMNS in
+// frontend/src/components/DataTable.tsx, which resolves response columns by label.
 var metadataColumns = []metadataColumn{
 	{DbName: "assembly", Label: "Assembly", Hidden: false},
-	{DbName: "bioproject", Label: "Bioproject", Hidden: true},
-	{DbName: "biosample", Label: "Biosample", Hidden: true},
 	{DbName: "taxid", Label: "Taxon ID", Hidden: false},
 	{DbName: "assembly_level", Label: "Assembly level", Hidden: true},
 	{DbName: "genome_size", Label: "Genome size", Hidden: false},
-	{DbName: "gc_percent", Label: "GC content (%)", Hidden: false},
+	{DbName: "gc_percent", Label: "%GC", Hidden: false},
 	{DbName: "superkingdom", Label: "Superkingdom", Hidden: false},
 	{DbName: "kingdom", Label: "Kingdom", Hidden: false},
 	{DbName: "phylum", Label: "Phylum", Hidden: false},
@@ -1266,13 +1268,21 @@ var metadataColumns = []metadataColumn{
 	{DbName: "order", Label: "Order", Hidden: false},
 	{DbName: "family", Label: "Family", Hidden: false},
 	{DbName: "genus", Label: "Genus", Hidden: false},
-	{DbName: "tax_name", Label: "Specie", Hidden: false},
-	{DbName: "is_t2t", Label: "T2T", Hidden: false},
+	{DbName: "tax_name", Label: "Species", Hidden: false},
+	{DbName: "is_t2t", Label: "Is T2T", Hidden: false},
 	{DbName: "viral_realm", Label: "Viral realm", Hidden: false},
-	{DbName: "updated_tax_name", Label: "Infraspecific name", Hidden: false},
-	{DbName: "obs_zbp", Label: "Z-DNA bps", Hidden: false},
-	{DbName: "obs_density_per_kb", Label: "Z-DNA density (per kb)", Hidden: false},
-	{DbName: "obs_n_zdna", Label: "Number of predictions", Hidden: false},
+	{DbName: "updated_tax_name", Label: "Full organism name", Hidden: false},
+	{DbName: "infraspecific_name", Label: "Infraspecific name", Hidden: true},
+	{DbName: "species_taxid", Label: "Species taxon ID", Hidden: true},
+	{DbName: "genome_size_ungapped", Label: "Genome size (ungapped)", Hidden: true},
+	{DbName: "replicon_count", Label: "Replicons", Hidden: true},
+	{DbName: "scaffold_count", Label: "Scaffolds", Hidden: true},
+	{DbName: "contig_count", Label: "Contigs", Hidden: true},
+	{DbName: "reference_genome", Label: "Reference genome", Hidden: true},
+	{DbName: "has_gff", Label: "Has GFF", Hidden: true},
+	{DbName: "obs_zbp", Label: "Z-DNA/-RNA bases count", Hidden: false},
+	{DbName: "obs_density_per_kb", Label: "Z-DNA/-RNA density per kb", Hidden: false},
+	{DbName: "obs_n_zdna", Label: "Z-DNA/-RNA predictions count", Hidden: false},
 }
 
 // Helper to build SELECT clause with proper column aliases

@@ -9,9 +9,12 @@ Robust + resumable:
     completed set is always the first N sorted files -> safe across restarts AND
     across changes to the batching scheme.
 
-Schema (matches old DB exactly):
-  Chromosome VARCHAR, Start BIGINT, End BIGINT, "Z-DNA Score" DOUBLE,
-  Sequence VARCHAR, assembly VARCHAR, Chromosome_alt VARCHAR
+Schema:
+  Chromosome VARCHAR, Start BIGINT, End BIGINT, "Z-DNA Score" FLOAT,
+  Sequence VARCHAR, assembly VARCHAR
+
+Placeholder rows (`Chromosome,,,,`, one per sequence without predictions) are skipped.
+Assemblies missing from the metadata TSV are removed later by build_meta_stats.py.
 """
 import os
 import glob
@@ -43,6 +46,8 @@ def select_from(files_sql):
                regexp_extract(parse_filename(filename), '{ACCESSION_RE}', 1) AS assembly
         FROM read_csv([{files_sql}], header=true, delim=',',
                       columns={COLS}, filename=true)
+        -- ZSeeker emits `Chromosome,,,,` for every sequence without predictions
+        WHERE "Start" IS NOT NULL
     """
 
 

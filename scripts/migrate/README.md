@@ -1,33 +1,46 @@
-# ZSeekerDB data migration (new Z-DNA dataset)
+# ZSeekerDB data migration (Oct-2026 release)
 
-Rebuilds `zdnadatabase.duckdb` from the new dataset into the **exact old schema**
-with the **same statistics logic**. Written with **DuckDB 1.1.3** (matches the
-deployed `go-duckdb v1.8.5` engine — required for file-format compatibility).
+Builds `zdnadatabase_2026-10.duckdb` from the new ZSeeker predictions and the Oct-2026
+metadata TSV, keeping the table/column names the backend and frontend already query.
+Written with **DuckDB 1.1.3**, to match the deployed `go-duckdb v1.8.5` engine (required
+for file-format compatibility).
 
 ## Inputs
-- `all_zseeker_final.tar.gz` — per-assembly `*.zseeker.csv` (Chromosome,Start,End,Z-DNA Score,Sequence)
-- `zseeker_db_assembly_all_metadata.tsv` — per-assembly metadata incl. precomputed Z-DNA stats
+- `all_zseeker_final.tar.gz`: per-assembly `*.zseeker.csv` (Chromosome,Start,End,Z-DNA Score,Sequence)
+- `zseeker_db_assembly_all_metadata.tsv` (Oct-2026, 31 cols, 324,198 assemblies): metadata
+  incl. per-assembly Z-DNA stats. Set `MIG_META_TSV` to override the path.
 
-## Pipeline (`run_all.sh` orchestrates)
-1. `audit.py` — CSV-vs-TSV assembly name-mismatch audit + regex coverage.
-2. `build_data.py` — builds `data` (2.59B rows). Byte-bounded, atomic, **resumable**
-   batches (resume = sorted-file prefix via `_ingest_state`).
-3. `build_meta_stats.py` — `metadata`, `chromosomes`, `tax_names`, `data_kpis`,
-   `data_top_asm`, `data_top_chrom`, and views `zdna` / `metadata_view`.
-   Idempotent (skips existing tables; `MIG_FORCE=1` to rebuild).
-4. `verify.py` — schema diff vs old, row counts, join integrity, endpoint-SQL replay.
+## Data rules
+- **Placeholder rows dropped.** ZSeeker writes `Chromosome,,,,` for every sequence without
+  predictions (24,116,216 rows); `data` holds real predictions only.
+- **Assemblies without predictions dropped** (`MIG_DROP_EMPTY_ASSEMBLIES=1`, default):
+  175,983 of 324,198, leaving 148,215 in `metadata`. Assemblies absent from the TSV are dropped too.
+- `metadata` column mapping (TSV -> DB): `assembly_accession`->`assembly`,
+  `ncbi_summary_taxid`->`taxid`, `resolve_level`->`assembly_level` (`Complete Genome`/`Chromosome`),
+  `z_predictions_count`->`obs_n_zdna`, `total_z_bases`->`obs_zbp`,
+  `z_density * 1000`->`obs_density_per_kb` (TSV density is a fraction of `genome_size_manual`),
+  `is_t2t` = "T2T" in the source filename. `bioproject`/`biosample` no longer exist.
+  New TSV fields are appended (see `release.py`).
+- `chromosomes` / `tax_names` list only chromosomes / species that have predictions.
 
-Tunables via env: `MIG_THREADS`, `MIG_MEM_GB`, `MIG_BATCH_BYTES`, `MIG_BATCH_MAXFILES`.
+## Pipelines
+**Incremental (used for this release):** `rebuild_release.py [data|metadata|derived]` copies
+`data` from the July build (`zdnadatabase_shrunk.duckdb`, same tarball) with the rules above,
+then rebuilds `metadata` and the derived tables. ~1.5h on a vm-small node.
 
-## Result (validated)
-- `data`: 2,588,094,125 rows / 324,200 assemblies; audit 0 mismatches; 0 join orphans.
-- Schema identical to old DB for all 9 objects; every backend endpoint returns 200.
+**From scratch:** extract the tarball to `build/csv`, then `run_all.sh`
+(`audit.py` -> `build_data.py` -> `build_meta_stats.py` -> `verify.py`).
 
-## Sequence 2-bit codec (`seqcodec.py`) — space-reduction work
-Lossless 2-bit packing of the `Sequence` column (72% of DB size) with a raw
-fallback for non-ACGT. Regression tests in `tests/` pin the sequence logic:
-- `test_seqcodec.py` — encode/decode round-trip, edge/fallback cases, real-sample round-trip.
-- `test_query_equivalence.py` — BLOB+decode reproduces identical results to VARCHAR
-  for projection, `LIKE` search, filters, lengths, and the `zdna` view shape.
+Both share the metadata/derived/view SQL in `release.py`.
 
-Run: `python3 -m pytest scripts/migrate/tests/ -q`
+## Verify
+`verify.py [db]`: schema, no NULL/placeholder rows, per-assembly counts and bases equal
+`metadata`, no orphans either way, density units, and a replay of endpoint/frontend SQL.
+Exits non-zero on any failure.
+
+Tunables via env: `MIG_THREADS`, `MIG_MEM_GB`, `MIG_BATCH_BYTES`, `MIG_BATCH_MAXFILES`, `MIG_DB_PATH`.
+
+## Sequence 2-bit codec (`seqcodec.py`): space-reduction experiment, not used
+Lossless 2-bit packing of `Sequence`. Benchmarked in July: `LIKE` search via the decode
+UDF is ~90x slower than VARCHAR, so the release keeps VARCHAR.
+Tests: `python3 -m pytest scripts/migrate/tests/ -q`

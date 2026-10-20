@@ -17,6 +17,16 @@ as one Railway service.
 4. Optionally set `CORS_ORIGIN` if the frontend will be hosted separately. It
    is not needed when using the bundled frontend.
 
+### Switching to a new data release
+
+Release databases are built with `scripts/migrate/` (see its README) and must be written
+with DuckDB 1.1.x to stay readable by `go-duckdb v1.8.5`.
+
+1. Upload the new file next to the current one, e.g. `/data/zdnadatabase_2026-10.duckdb`.
+2. Set `DUCKDB_PATH` to the new file and redeploy; check `/api/health` and the pages.
+3. To roll back, point `DUCKDB_PATH` at the previous file and redeploy. Delete the old
+   file only after the release is signed off.
+
 The deployment health check is `/api/health`. The service intentionally starts
 without a DuckDB file so Railway can deploy before the volume is populated. In
 that state health returns HTTP 200 with `"status":"degraded"`, and data API
