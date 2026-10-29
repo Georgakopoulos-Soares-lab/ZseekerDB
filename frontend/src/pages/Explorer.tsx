@@ -24,6 +24,9 @@ import ReactECharts from 'echarts-for-react';
 import { useSearchParams } from 'react-router-dom';
 import { useDebounce } from '../hooks/useDebounce';
 import { VIZ_FONT, VIZ_MUI_FONT } from '../utils/visualizationTypography';
+import { runSQL } from '../utils/sql';
+import type { ChartParam } from '../utils/chartTypes';
+import { COUNT_TICKS, LENGTH_TICKS, SCORE_TICKS, linearTicks, tickPosition, ticksUpTo } from '../utils/tickScale';
 
 /* ------------------------------- Types/Helpers ------------------------------ */
 
@@ -37,36 +40,82 @@ type Row = {
 
 type KV = { label: string };
 
+type ChrStat = {
+  assembly: string;
+  chr: string;
+  n: number;
+  score: number[];   // min, q1, median, q3, max
+  length: number[];  // min, q1, median, q3, max
+  scaffolds: number;
+  gsize: number;
+};
+type Sample = { pos: number; len: number; score: number };
+type VizData = {
+  single: boolean;            // one chromosome (selected, or the only one)
+  chromLen: number;           // single mode: extent used for the bins
+  binSize: number;
+  bins: number[];             // single mode: site counts per bin
+  chrStats: ChrStat[];        // genome-wide mode, natural order (by site count if collapsed)
+  hiddenChromosomes: number;  // chromosomes collapsed into the "…" bin
+  scoreHist: { bin: number; n: number }[];
+  lenHist: { bin: number; n: number }[];
+  sample: Sample[];
+};
+
 const DEFAULT_PAGE_SIZE = 25;
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
 const AUTOCOMPLETE_LIMIT = 100;
 const BATCH_EXPORT = 50_000;          // rows per export chunk
 const MAX_EXPORT_ROWS = 1_000_000;    // safety cap for client export
 const SCATTER_SAMPLE = 20_000;        // nominal sample size for scatter
+const VIZ_BINS = 10;                  // bins along a single chromosome
+const MAX_VIZ_CHROMOSOMES = 25;       // per-chromosome panels: all chromosomes up to this many,
+const VIZ_CHROMOSOME_EDGE = 12;       // otherwise the top and lowest 12 by site count with a gap bin
 
 const q = (s: string) => `'${String(s).replace(/'/g, "''")}'`;
 const fmtNum = (n: number) => (Number.isFinite(n) ? n.toLocaleString() : '');
-const getVal = (o: any, k: string) => o?.[k] ?? o?.[k.toLowerCase()] ?? o?.[k.toUpperCase()];
+const getVal = (o: unknown, k: string): unknown => {
+  const r = (o ?? {}) as Record<string, unknown>;
+  return r[k] ?? r[k.toLowerCase()] ?? r[k.toUpperCase()];
+};
+// Bin size with unit, e.g. 24.8 Mb / 3.2 kb / 512 bp.
+const fmtBp = (bp: number) =>
+  bp >= 1e6 ? `${+(bp / 1e6).toFixed(1)} Mb` : bp >= 1e3 ? `${+(bp / 1e3).toFixed(1)} kb` : `${Math.round(bp)} bp`;
+const fmtMb = (mb: number) => `${+mb.toFixed(mb >= 10 ? 1 : 3)}`;
+
+// Axis tick labels and titles don't inherit the global textStyle size in ECharts,
+// so apply the plot font size to them unless a chart sets its own.
+function withAxisFont(axis: unknown): unknown {
+  const one = (a: unknown) => {
+    if (!a || typeof a !== 'object') return a;
+    const ax = a as Record<string, object | undefined>;
+    return {
+      ...ax,
+      axisLabel: { fontSize: VIZ_FONT.base, ...(ax.axisLabel ?? {}) },
+      nameTextStyle: { fontSize: VIZ_FONT.base, ...(ax.nameTextStyle ?? {}) },
+    };
+  };
+  return Array.isArray(axis) ? axis.map(one) : one(axis);
+}
 
 function FullWidthChart({
   option,
   height = 400,
   deps = [],
-  ...rest
 }: {
   option: Record<string, unknown>;
   height?: number;
-  deps?: any[];
-  [key: string]: any;
+  deps?: unknown[];
 }) {
-  const ref = useRef<any>(null);
+  const ref = useRef<ReactECharts>(null);
 
   useEffect(() => {
-    // μικρή καθυστέρηση ώστε να έχει μετρηθεί σωστά το layout του Grid
     const t = setTimeout(() => {
       ref.current?.getEchartsInstance()?.resize();
     }, 0);
     return () => clearTimeout(t);
+    // Callers pass the values whose change should trigger a resize.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
   return (
@@ -78,45 +127,23 @@ function FullWidthChart({
           ...((option.textStyle ?? {}) as Record<string, unknown>),
           fontSize: VIZ_FONT.base,
         },
+        xAxis: withAxisFont(option.xAxis),
+        yAxis: withAxisFont(option.yAxis),
       }}
       style={{ height, width: '100%' }}
       opts={{ renderer: 'svg' }}
       notMerge={true}
       lazyUpdate={false}
-      {...rest}
     />
   );
 }
 
 
-/* --------------------------------- SQL runner -------------------------------- */
-// FIX: normalize SQL to single line + better error handling (prevents 400s on some backends)
-async function runSQL<T = any>(sql: string): Promise<T[]> {
-  const normalized = sql.replace(/\s+/g, ' ').trim();
-  const url = `/api/sql?query=${encodeURIComponent(normalized)}`;
-  const r = await fetch(url, { headers: { Accept: 'application/json' }, cache: 'no-store' });
-  const text = await r.text();
-  let j: any = null;
-  try { j = JSON.parse(text); } catch { /* ignore */ }
-  if (!r.ok) {
-    const msg = (j && j.error) ? String(j.error) : `SQL HTTP ${r.status}`;
-    throw new Error(msg);
-  }
-  if (Array.isArray(j?.data)) return j.data as T[];
-  if (Array.isArray(j?.rows) && Array.isArray(j?.columns)) {
-    const cols: string[] = j.columns;
-    return (j.rows as any[]).map((arr) =>
-      Object.fromEntries(cols.map((c, i) => [c, arr[i]]))
-    ) as T[];
-  }
-  return Array.isArray(j) ? (j as T[]) : [];
-}
-
 /* -------------------------------- Exporters -------------------------------- */
 
 function buildCsv(rows: Row[], sep = ',') {
   const head = ['Chromosome', 'Start', 'End', 'Z-DNA Score', 'Sequence'];
-  const escape = (v: any) => {
+  const escape = (v: unknown) => {
     const s = v == null ? '' : String(v);
     if (s.includes(sep) || s.includes('"') || s.includes('\n')) {
       return `"${s.replace(/"/g, '""')}"`;
@@ -131,7 +158,7 @@ function buildCsv(rows: Row[], sep = ',') {
 }
 const buildJson = (rows: Row[]) => JSON.stringify(rows, null, 2);
 function buildXml(rows: Row[]) {
-  const esc = (s: any) =>
+  const esc = (s: unknown) =>
     String(s ?? '')
       .replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
@@ -141,7 +168,7 @@ function buildXml(rows: Row[]) {
   return `<?xml version="1.0" encoding="UTF-8"?>\n<rows>\n${items.join('\n')}\n</rows>\n`;
 }
 function buildExcelHtml(rows: Row[]) {
-  const esc = (s: any) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const esc = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const head = `<tr><th>Chromosome</th><th>Start</th><th>End</th><th>Z-DNA Score</th><th>Sequence</th></tr>`;
   const body = rows
     .map(r => `<tr><td>${esc(r.Chromosome)}</td><td>${r.Start}</td><td>${r.End}</td><td>${r.Score}</td><td>${esc(r.Sequence)}</td></tr>`)
@@ -234,6 +261,21 @@ export default function Explorer() {
 
   const hasQueryContext = Boolean(species) || Boolean(lockedAssembly);
 
+  // Total predictions for the selected species / assembly (from metadata), so the
+  // results table can say when there are none at all rather than "refine filters".
+  const [contextPredictions, setContextPredictions] = useState<number | null>(null);
+  useEffect(() => {
+    if (!hasQueryContext) { setContextPredictions(null); return; }
+    let dead = false;
+    const where = lockedAssembly
+      ? `assembly = ${q(lockedAssembly)}`
+      : `genome_size_manual >= 1000 AND tax_name = ${q(species!)}`;
+    runSQL<{ n: number }>(`SELECT COALESCE(SUM(obs_n_zdna), 0) AS n FROM metadata WHERE ${where}`)
+      .then(r => { if (!dead) setContextPredictions(Number(r[0]?.n ?? 0)); })
+      .catch(() => { if (!dead) setContextPredictions(null); });
+    return () => { dead = true; };
+  }, [hasQueryContext, lockedAssembly, species]);
+
   /* ---------------------------- Autocomplete: species ---------------------------- */
   // Debounce species input
   const debouncedSpeciesInput = useDebounce(speciesInput, 300);
@@ -249,30 +291,11 @@ export default function Explorer() {
       return speciesSearchCache.get(cacheKey)!;
     }
 
-    // Try tax_names table first
-    let sql = `
-      SELECT tax_name AS label 
-      FROM tax_names 
-      WHERE lower(tax_name) LIKE ${q(prefix.toLowerCase() + '%')} 
-      ORDER BY 1 
-      LIMIT ${AUTOCOMPLETE_LIMIT}
-    `;
-
-    try {
-      const results = await runSQL<KV>(sql);
-      if (results.length) {
-        speciesSearchCache.set(cacheKey, results);
-        return results;
-      }
-    } catch {
-      // Fallback to metadata if tax_names fails
-    }
-
-    // Fallback: search in metadata
-    sql = `
+    // All species in the release metadata, including those without predictions
+    const sql = `
       SELECT DISTINCT tax_name AS label 
       FROM metadata 
-      WHERE genome_size >= 1000 AND lower(tax_name) LIKE ${q(prefix.toLowerCase() + '%')} 
+      WHERE genome_size_manual >= 1000 AND lower(tax_name) LIKE ${q(prefix.toLowerCase() + '%')} 
       ORDER BY 1 
       LIMIT ${AUTOCOMPLETE_LIMIT}
     `;
@@ -326,7 +349,7 @@ export default function Explorer() {
         if (lockedAssembly) {
           where = `assembly = ${q(lockedAssembly)}`;
         } else {
-          where = `assembly IN (SELECT assembly FROM metadata WHERE genome_size >= 1000 AND tax_name = ${q(species!)})`;
+          where = `assembly IN (SELECT assembly FROM metadata WHERE genome_size_manual >= 1000 AND tax_name = ${q(species!)})`;
         }
 
         const andPrefix = prefix ? `AND lower("Chromosome") LIKE ${q(prefix + '%')}` : '';
@@ -354,7 +377,7 @@ export default function Explorer() {
     const parts: string[] = [];
     if (!species && !lockedAssembly) return '1=0';
 
-    if (species)        parts.push(`assembly IN (SELECT assembly FROM metadata WHERE genome_size >= 1000 AND tax_name = ${q(species)})`);
+    if (species)        parts.push(`assembly IN (SELECT assembly FROM metadata WHERE genome_size_manual >= 1000 AND tax_name = ${q(species)})`);
     if (lockedAssembly) parts.push(`assembly = ${q(lockedAssembly)}`);
 
     if (chr) parts.push(`"Chromosome" = ${q(chr)}`);
@@ -445,7 +468,6 @@ export default function Explorer() {
     const all: Row[] = [];
     while (offset < totalRows) {
       const batchSql = `${selectSql} LIMIT ${BATCH_EXPORT} OFFSET ${offset}`;
-      // eslint-disable-next-line no-await-in-loop
       const part = await runSQL<Row>(batchSql);
       all.push(...part);
       offset += BATCH_EXPORT;
@@ -464,137 +486,139 @@ export default function Explorer() {
   }
 
   /* -------------------------------- Visualizations ------------------------------- */
+  // Two layouts share the same six panels:
+  //  - single chromosome (one selected, or the genome has only one): site counts in
+  //    10 bins along the chromosome, score/length vs position scatters;
+  //  - genome-wide: site counts per chromosome, per-chromosome score/length bars.
 
   const [vizLoading, setVizLoading] = useState(false);
-  const [hist, setHist] = useState<{ bin: number; n: number }[]>([]);
-  const [density, setDensity] = useState<{ start: number; n: number }[]>([]);
-  const [scatter, setScatter] = useState<{ x: number; y: number }[]>([]);
-  const [kmers, setKmers] = useState<{ motif: string; n: number }[]>([]);
-  const [boxRows, setBoxRows] = useState<{ chr: string; min: number; q1: number; median: number; q3: number; max: number }[]>([]);
-  const [lenScore, setLenScore] = useState<{ len: number; score: number }[]>([]); // NEW
-  const [genomicDist, setGenomicDist] = useState<{ pos: number; score: number }[]>([]); // NEW
+  const [viz, setViz] = useState<VizData | null>(null);
+  const vizRequest = useRef(0);
+
+  // Species / assembly part of the WHERE clause only (no user filters).
+  const contextWhere = useMemo(() => {
+    if (lockedAssembly) return `assembly = ${q(lockedAssembly)}`;
+    if (species) return `assembly IN (SELECT assembly FROM metadata WHERE genome_size_manual >= 1000 AND tax_name = ${q(species)})`;
+    return '1=0';
+  }, [species, lockedAssembly]);
 
   async function fetchViz() {
     if (!hasQueryContext) return;
+    const request = ++vizRequest.current;
     setVizLoading(true);
     try {
-      // 1) Histogram (no WITH; subquery)
-      const sqlHist = `
-        SELECT CAST(FLOOR(score/10)*10 AS INT) AS "bin", COUNT(*) AS "n"
+      const len = `("End" - "Start" + 1)`;
+      // Per-chromosome summary; "total" counts all chromosomes. Beyond MAX_VIZ_CHROMOSOMES
+      // keep only the top and lowest VIZ_CHROMOSOME_EDGE by site count.
+      const sqlChrStats = `
+        SELECT * FROM (
+        SELECT s.*, m.scaffold_count AS scaffolds, m.genome_size_manual AS gsize, COUNT(*) OVER () AS total,
+          ROW_NUMBER() OVER (ORDER BY n DESC, chr) AS rank_top,
+          ROW_NUMBER() OVER (ORDER BY n ASC, chr DESC) AS rank_low
         FROM (
-          SELECT "Z-DNA Score" AS score
+          SELECT assembly, "Chromosome" AS chr, COUNT(*) AS n,
+            MIN("Z-DNA Score") AS s_min, quantile("Z-DNA Score", 0.25) AS s_q1, quantile("Z-DNA Score", 0.5) AS s_med,
+            quantile("Z-DNA Score", 0.75) AS s_q3, MAX("Z-DNA Score") AS s_max,
+            MIN(${len}) AS l_min, quantile(${len}, 0.25) AS l_q1, quantile(${len}, 0.5) AS l_med,
+            quantile(${len}, 0.75) AS l_q3, MAX(${len}) AS l_max
           FROM data
           WHERE ${whereSql}
-        ) f
-        GROUP BY "bin"
-        ORDER BY "bin"
+          GROUP BY assembly, "Chromosome"
+        ) s
+        LEFT JOIN metadata m ON m.assembly = s.assembly
+        ) t
+        WHERE total <= ${MAX_VIZ_CHROMOSOMES} OR rank_top <= ${VIZ_CHROMOSOME_EDGE} OR rank_low <= ${VIZ_CHROMOSOME_EDGE}
+        ORDER BY rank_top
       `;
+      const stats = await runSQL<Record<string, unknown>>(sqlChrStats).catch(() => []);
+      if (request !== vizRequest.current) return;
 
-      // 2) Density (100kb windows) – relies only on whereSql (no double AND)
-      const sqlDensity = chr ? `
-        SELECT FLOOR("Start"/100000)*100000 AS "start", COUNT(*) AS "n"
+      const num = (r: Record<string, unknown>, k: string) => Number(getVal(r, k));
+      const chrStats: ChrStat[] = stats.map(r => ({
+        assembly: String(getVal(r, 'assembly')),
+        chr: String(getVal(r, 'chr')),
+        n: num(r, 'n'),
+        score: [num(r, 's_min'), num(r, 's_q1'), num(r, 's_med'), num(r, 's_q3'), num(r, 's_max')],
+        length: [num(r, 'l_min'), num(r, 'l_q1'), num(r, 'l_med'), num(r, 'l_q3'), num(r, 'l_max')],
+        scaffolds: num(r, 'scaffolds'),
+        gsize: num(r, 'gsize'),
+      }));
+      const total = stats.length ? num(stats[0], 'total') : 0;
+      const single = chrStats.length > 0 && (Boolean(chr) || total === 1);
+
+      // Chromosome extent for the 10 bins. Chromosome lengths are not stored, so this is
+      // the assembly size for single-sequence assemblies, otherwise the last predicted base.
+      let chromLen = 0;
+      if (single) {
+        const chrName = chr ?? chrStats[0].chr;
+        if (chrStats.every(s => s.scaffolds === 1 && s.gsize > 0)) {
+          chromLen = Math.max(...chrStats.map(s => s.gsize));
+        } else {
+          const r = await runSQL<Record<string, unknown>>(
+            `SELECT MAX("End") AS m FROM data WHERE ${contextWhere} AND "Chromosome" = ${q(chrName)}`
+          ).catch(() => []);
+          chromLen = Number(getVal(r[0], 'm') ?? 0);
+        }
+        if (request !== vizRequest.current) return;
+      }
+      const binSize = chromLen > 0 ? chromLen / VIZ_BINS : 0;
+
+      const sqlScoreHist = `
+        SELECT CAST(FLOOR(score/10)*10 AS INT) AS "bin", COUNT(*) AS "n"
+        FROM (SELECT "Z-DNA Score" AS score FROM data WHERE ${whereSql}) f
+        GROUP BY "bin" ORDER BY "bin"
+      `;
+      // Length bins of 10 bp aligned to the 9 bp minimum (9, 19, 29, …).
+      const sqlLenHist = `
+        SELECT CAST(9 + FLOOR((l - 9)/10)*10 AS INT) AS "bin", COUNT(*) AS "n"
+        FROM (SELECT ${len} AS l FROM data WHERE ${whereSql}) f
+        GROUP BY "bin" ORDER BY "bin"
+      `;
+      // Deterministic sample (same rows on every load).
+      const sqlSample = `
+        SELECT "Start" AS pos, ${len} AS len, "Z-DNA Score" AS score
+        FROM data
+        WHERE ${whereSql}
+        ORDER BY hash(assembly, "Chromosome", "Start")
+        LIMIT ${SCATTER_SAMPLE}
+      `;
+      const sqlBins = binSize > 0 ? `
+        SELECT LEAST(GREATEST(CAST(FLOOR(("Start" - 1) / ${binSize}) AS INT), 0), ${VIZ_BINS - 1}) AS b, COUNT(*) AS n
         FROM data
         WHERE ${whereSql}
         GROUP BY 1
-        ORDER BY 1
       ` : null;
 
-      // 3) Start vs Score (per chr) – keep it light with LIMIT
-      const sqlScatter = chr ? `
-        SELECT "Start" AS "x", "Z-DNA Score" AS "y"
-        FROM data
-        WHERE ${whereSql}
-        ORDER BY "Start"
-        LIMIT ${SCATTER_SAMPLE}
-      ` : null;
-
-      // 4) Genomic distribution
-      const sqlGenomicDist = `
-        SELECT "Start" as pos, "Z-DNA Score" as score 
-        FROM data
-        WHERE ${whereSql}
-        ORDER BY random()
-        LIMIT ${SCATTER_SAMPLE}
-      `;
-
-      // 5) Box stats per chromosome (up to 30 chromosomes)
-      const sqlBox = `
-        SELECT
-          chr, "min", q1, median, q3, "max"
-        FROM (
-          SELECT
-            s.*,
-            ROW_NUMBER() OVER (ORDER BY median DESC) AS rn,
-            COUNT(*)    OVER ()                       AS total
-          FROM (
-            SELECT
-              "chr",
-              MIN(s)            AS "min",
-              quantile(s,0.25)  AS q1,
-              quantile(s,0.50)  AS median,
-              quantile(s,0.75)  AS q3,
-              MAX(s)            AS "max"
-            FROM (
-              SELECT "Chromosome" AS "chr", "Z-DNA Score" AS s
-              FROM data
-              WHERE ${whereSql}
-            ) f
-            GROUP BY "chr"
-          ) AS s
-        ) AS ranked
-        WHERE rn <= CASE WHEN total <= 30 THEN total ELSE 30 END
-        ORDER BY median DESC
-      `;
-
-      // 6) Length vs Score (sampled with LIMIT)
-      const sqlLenScore = `
-        SELECT ("End" - "Start" + 1) AS "len", "Z-DNA Score" AS "score"
-        FROM data
-        WHERE ${whereSql}
-        ORDER BY "Start"
-        LIMIT ${SCATTER_SAMPLE}
-      `;
-
-      const results = await Promise.allSettled([
-        runSQL<{ bin: number; n: number }>(sqlHist),
-        sqlDensity ? runSQL<{ start: number; n: number }>(sqlDensity) : Promise.resolve([]),
-        sqlScatter ? runSQL<{ x: number; y: number }>(sqlScatter) : Promise.resolve([]),
-        runSQL<{ motif: string; n: number }>(sqlGenomicDist),
-        runSQL<{ chr: string; min: number; q1: number; median: number; q3: number; max: number }>(sqlBox),
-        runSQL<{ len: number; score: number }>(sqlLenScore),
+      const [scoreHist, lenHist, sample, binRows] = await Promise.all([
+        runSQL<Record<string, unknown>>(sqlScoreHist).catch(() => []),
+        runSQL<Record<string, unknown>>(sqlLenHist).catch(() => []),
+        runSQL<Record<string, unknown>>(sqlSample).catch(() => []),
+        sqlBins ? runSQL<Record<string, unknown>>(sqlBins).catch(() => []) : Promise.resolve([]),
       ]);
+      if (request !== vizRequest.current) return;
 
-      const ok = <T,>(i: number, def: T): T =>
-        results[i].status === 'fulfilled' ? (results[i] as PromiseFulfilledResult<T>).value : def;
+      const toHist = (rows: Record<string, unknown>[]) => rows
+        .map(d => ({ bin: num(d, 'bin'), n: num(d, 'n') }))
+        .filter(v => Number.isFinite(v.bin) && Number.isFinite(v.n));
+      const bins = Array.from({ length: VIZ_BINS }, () => 0);
+      binRows.forEach(d => { const b = num(d, 'b'); if (b >= 0 && b < VIZ_BINS) bins[b] = num(d, 'n'); });
 
-      setHist(ok(0, []).map(d => ({ bin: Number(getVal(d, 'bin')), n: Number(getVal(d, 'n')) }))
-        .filter(v => Number.isFinite(v.bin) && Number.isFinite(v.n)));
-
-      setDensity(ok(1, []).map(d => ({ start: Number(getVal(d, 'start')), n: Number(getVal(d, 'n')) }))
-        .filter(v => Number.isFinite(v.start) && Number.isFinite(v.n)));
-
-      setScatter(ok(2, []).map(d => ({ x: Number(getVal(d, 'x')), y: Number(getVal(d, 'y')) }))
-        .filter(v => Number.isFinite(v.x) && Number.isFinite(v.y)));
-
-      setGenomicDist(ok(3, []).map(d => ({
-        pos: Number(getVal(d, 'pos')),
-        score: Number(getVal(d, 'score'))
-      })).filter(v => Number.isFinite(v.pos) && Number.isFinite(v.score)));
-
-      setBoxRows(ok(4, []).map(d => ({
-        chr:    String(getVal(d, 'chr')),
-        min:    Number(getVal(d, 'min')),
-        q1:     Number(getVal(d, 'q1')),
-        median: Number(getVal(d, 'median')),
-        q3:     Number(getVal(d, 'q3')),
-        max:    Number(getVal(d, 'max')),
-      })).filter(v => v.chr && [v.min, v.q1, v.median, v.q3, v.max].every(Number.isFinite)));
-
-      setLenScore(ok(5, []).map(d => ({ len: Number(getVal(d, 'len')), score: Number(getVal(d, 'score')) }))
-        .filter(v => Number.isFinite(v.len) && Number.isFinite(v.score)));
-
+      setViz({
+        single,
+        chromLen,
+        binSize,
+        bins,
+        // Natural chromosome order, or by site count when the middle is collapsed.
+        chrStats: total > MAX_VIZ_CHROMOSOMES ? chrStats : [...chrStats].sort((a, b) => naturalSort(a.chr, b.chr)),
+        hiddenChromosomes: Math.max(0, total - chrStats.length),
+        scoreHist: toHist(scoreHist),
+        lenHist: toHist(lenHist),
+        sample: sample
+          .map(d => ({ pos: num(d, 'pos'), len: num(d, 'len'), score: num(d, 'score') }))
+          .filter(v => [v.pos, v.len, v.score].every(Number.isFinite)),
+      });
     } finally {
-      setVizLoading(false);
+      if (request === vizRequest.current) setVizLoading(false);
     }
   }
 
@@ -607,25 +631,16 @@ export default function Explorer() {
 
   /* ------------------------------- ECharts options ------------------------------ */
 
-  // Common grid settings with enough margin for axis labels
-  const commonGrid = {
-    left: '12%',    // More space for y-axis label
-    right: '4%',
-    top: '10%',
-    bottom: '12%',  // More space for x-axis label
-    containLabel: true
-  };
-
-  // Color constants
   const CHART_COLORS = {
-    histogram: '#8884d8',      // Purple
-    genomicDist: '#82ca9d',    // Green
+    counts: '#0088fe',         // Blue
+    scoreHist: '#8884d8',      // Purple
+    scoreScatter: '#82ca9d',   // Green
+    scoreBars: '#ff7300',      // Orange
+    lengthHist: '#ff6b81',     // Pink
+    lengthDist: '#26a69a',     // Teal
     lenScore: '#ffc658',       // Gold
-    boxplot: '#ff7300',        // Orange
-    density: '#0088fe',        // Blue
-    scatter: '#ff6b81'         // Pink
   };
-
+  const barOutline = { borderColor: '#000000', borderWidth: 1 };
 
   const baseTooltip = useMemo(
     () => ({
@@ -640,355 +655,225 @@ export default function Explorer() {
     [tooltipBg, tooltipText]
   );
 
-  // 1. Histogram (Z-DNA Score)
-  const histOpt = useMemo(
-    () => ({
-      grid: commonGrid,
-      tooltip: {
-        ...baseTooltip,
-        trigger: 'item', // στενό tooltip, όχι axis-wide
-        axisPointer: { type: 'none' },
-        formatter: (p: any) => `${p.name}: ${fmtNum(p.value)}`,
-        extraCssText: 'max-width: 140px; white-space: nowrap;',
-      },
-      xAxis: {
-        type: 'category',
-        data: hist.map((d) => d.bin),
-        name: 'Score',
-        nameLocation: 'middle',
-        nameGap: 35,
-        nameTextStyle: { color: axisNameColor },
-        axisLabel: {
-          formatter: (v: any) => String(v),
-          color: axisLabelColor,
-        },
-      },
-      yAxis: {
-        type: 'log',
-        logBase: 10,
-        name: 'Counts (log{sub|10})',
-        nameTextStyle: {
-          color: axisNameColor,
-          rich: {
-            sub: {
-              color: axisNameColor,
-              fontSize: VIZ_FONT.subscript,
-              verticalAlign: 'bottom',
-              padding: [6, 0, 0, 0],
-            },
-          },
-        },
-        nameLocation: 'middle',
-        nameGap: 60,
-        minorTick: { show: false },
-        minorSplitLine: { show: false },
-        axisLabel: {
-          color: axisLabelColor,
-        },
-      },
-      series: [
-        {
-          type: 'bar',
-          data: hist.map((d) => d.n),
-          itemStyle: {
-            color: CHART_COLORS.histogram,
-          },
-        },
-      ],
-    }),
-    [hist, baseTooltip, axisLabelColor, axisNameColor]
-  );
+  const vizOptions = useMemo(() => {
+    const empty = { counts: null, scoreHist: null, scoreDist: null, lenHist: null, lenDist: null, lenScore: null };
+    if (!viz) return empty;
 
-  // 2. Density (Sites / 100kb)
-  const densityOpt = useMemo(() => {
-    if (!density.length) return null;
+    const axisLine = { show: true, lineStyle: { color: isDark ? '#ffffff' : '#000000', width: 2 } };
+    // Left/bottom margins leave room for the axis titles, which sit outside the tick labels.
+    const grid = { left: 45, right: 30, top: 20, bottom: 45, containLabel: true };
+    // Axis-title gap that clears the widest tick label (titles sit outside the labels).
+    const labelWidth = (labels: string[], fontSize = VIZ_FONT.base) =>
+      Math.max(0, ...labels.map(l => l.length)) * fontSize * 0.62;
+    const yGap = (labels: string[]) => labelWidth(labels) + 16;
+    const axisName = (name: string, nameGap: number) => ({
+      name, nameLocation: 'middle', nameGap, nameTextStyle: { color: axisNameColor },
+    });
+    // Value axis showing a tick ladder at equal distances.
+    const ladderAxis = (ticks: number[], name: string) => ({
+      type: 'value',
+      min: 0,
+      max: ticks.length - 1,
+      interval: 1,
+      axisLine,
+      ...axisName(name, yGap(ticks.map(fmtNum))),
+      axisLabel: { color: axisLabelColor, formatter: (v: number) => fmtNum(ticks[Math.round(v)]) },
+    });
+    const ladderXAxis = (ticks: number[], name: string) => ({
+      ...ladderAxis(ticks, name),
+      ...axisName(name, 35),
+    });
 
-    const singleBin = density.length === 1;
-
-    if (singleBin) {
-      const d = density[0];
-      const x = d.start + 50_000;
-
+    // Score / length counts (log y-axis, bins on a category x-axis).
+    const histogram = (rows: { bin: number; n: number }[], xName: string, color: string) => {
+      if (!rows.length) return null;
+      const maxN = Math.max(...rows.map(r => r.n));
       return {
-        grid: commonGrid,
+        grid,
         tooltip: {
           ...baseTooltip,
-          trigger: 'axis',
+          trigger: 'item',
+          axisPointer: { type: 'none' },
+          formatter: (p: ChartParam) => `${p.name}: ${fmtNum(Number(p.value))}`,
           extraCssText: 'max-width: 140px; white-space: nowrap;',
-          formatter: (p: any) =>
-            `Position: ${fmtNum(p.value[0])}\nSites / 100kb: ${fmtNum(
-              p.value[1]
-            )}`,
         },
         xAxis: {
-          type: 'value',
-          name: 'Position',
-          nameLocation: 'middle',
-          nameGap: 35,
-          min: 0,
-          max: x * 2 || 100_000,
-          nameTextStyle: { color: axisNameColor },
-          axisLabel: {
-            formatter: (v: number) => fmtNum(v),
-            color: axisLabelColor,
-          },
+          type: 'category',
+          data: rows.map(d => d.bin),
+          axisLine,
+          ...axisName(xName, 35),
+          axisLabel: { formatter: (v: string | number) => String(v), color: axisLabelColor },
         },
         yAxis: {
-          type: 'value',
-          name: 'Sites / 100kb',
-          nameLocation: 'middle',
-          nameGap: 60,
-          nameTextStyle: { color: axisNameColor },
+          type: 'log',
+          logBase: 10,
+          axisLine,
+          ...axisName('Counts', yGap([fmtNum(10 ** Math.ceil(Math.log10(Math.max(maxN, 1))))])),
+          minorTick: { show: false },
+          minorSplitLine: { show: false },
           axisLabel: { color: axisLabelColor },
         },
-        series: [
-          {
-            type: 'scatter',
-            symbolSize: 20,
-            data: [[x, d.n]],
-            itemStyle: { color: CHART_COLORS.density },
-          },
-        ],
+        series: [{ type: 'bar', data: rows.map(d => d.n), itemStyle: { color } }],
       };
-    }
-
-    // >1 bin → bars
-    return {
-      grid: commonGrid,
-      tooltip: {
-        ...baseTooltip,
-        trigger: 'axis',
-        extraCssText: 'max-width: 140px; white-space: nowrap;',
-        formatter: (p: any) =>
-          `${fmtNum(p[0].value[0])}: ${fmtNum(p[0].value[1])}`,
-      },
-      xAxis: {
-        type: 'value',
-        name: 'Position',
-        nameLocation: 'middle',
-        nameGap: 35,
-        nameTextStyle: { color: axisNameColor },
-        axisLabel: {
-          formatter: (v: number) => fmtNum(v),
-          color: axisLabelColor,
-        },
-      },
-      yAxis: {
-        type: 'value',
-        name: 'Sites / 100kb',
-        nameLocation: 'middle',
-        nameGap: 60,
-        nameTextStyle: { color: axisNameColor },
-        axisLabel: { color: axisLabelColor },
-      },
-      series: [
-        {
-          type: 'bar',
-          data: density.map((d) => [d.start, d.n]),
-          itemStyle: {
-            color: CHART_COLORS.density,
-          },
-        },
-      ],
     };
-  }, [density, baseTooltip, axisLabelColor, axisNameColor]);
 
-  // 3. Scatter: Z-DNA Score across genomic positions (per chr)
-  const scatterOpt = useMemo(() => {
-    if (!scatter.length) return null;
-    return {
-      grid: commonGrid,
-      tooltip: {
-        ...baseTooltip,
-        trigger: 'axis',
-        extraCssText: 'max-width: 140px; white-space: nowrap;',
-        formatter: (p: any) =>
-          `Start: ${fmtNum(p.value[0])}\nScore: ${p.value[1].toFixed(2)}`,
-      },
-      xAxis: {
-        type: 'value',
-        name: 'Start Position',
-        nameLocation: 'middle',
-        nameGap: 35,
-        nameTextStyle: { color: axisNameColor },
-        axisLabel: {
-          formatter: (v: number) => fmtNum(v),
-          color: axisLabelColor,
-        },
-      },
-      yAxis: {
-        type: 'value',
-        name: 'Z-DNA Score',
-        nameLocation: 'middle',
-        nameGap: 60,
-        nameTextStyle: { color: axisNameColor },
-        axisLabel: { color: axisLabelColor },
-      },
-      series: [
-        {
-          type: 'scatter',
-          symbolSize: 5,
-          data: scatter.map((d) => [d.x, d.y]),
-          itemStyle: {
-            color: CHART_COLORS.scatter,
-          },
-        },
-      ],
+    // Chromosome category axis with slightly smaller labels so names don't overlap.
+    const chrSlots: (ChrStat | null)[] = viz.hiddenChromosomes > 0
+      ? [...viz.chrStats.slice(0, VIZ_CHROMOSOME_EDGE), null, ...viz.chrStats.slice(VIZ_CHROMOSOME_EDGE)]
+      : viz.chrStats;
+    const chrLabels = chrSlots.map(s => s?.chr ?? '…');
+    const gapText = `${fmtNum(viz.hiddenChromosomes)} more chromosomes`;
+    const chrFont = VIZ_FONT.base - 2;
+    const chrRotate = chrLabels.length > 12 ? 45 : 0;
+    const chrAxis = {
+      type: 'category',
+      data: chrLabels,
+      axisLine,
+      ...axisName('Chromosome', (chrRotate ? labelWidth(chrLabels, chrFont) * 0.71 : 0) + chrFont + 18),
+      axisLabel: { interval: 0, rotate: chrRotate, fontSize: chrFont, color: axisLabelColor },
     };
-  }, [scatter, baseTooltip, axisLabelColor, axisNameColor]);
 
-  // 4. Boxplot: Z-DNA Score ανά χρωμόσωμα
-  const boxOpt = useMemo(() => {
-    if (!boxRows.length) return null;
-
-    const sortedBoxRows = [...boxRows].sort((a, b) =>
-      naturalSort(a.chr, b.chr)
-    );
-
-    return {
-      grid: {
-        ...commonGrid,
-        bottom: '20%', // extra space for rotated labels
-      },
-      tooltip: {
-        ...baseTooltip,
-        trigger: 'axis',
-        extraCssText: 'max-width: 200px; white-space: nowrap;',
-      },
-      xAxis: {
-        type: 'category',
-        data: sortedBoxRows.map((b) => b.chr),
-        name: 'Chromosome',
-        nameLocation: 'middle',
-        nameGap: 70,
-        nameTextStyle: { color: axisNameColor },
-        axisLabel: {
-          rotate: 45,
-          interval: 0,
-          color: axisLabelColor,
-        },
-      },
-      yAxis: {
-        type: 'value',
-        name: 'Z-DNA Score',
-        nameLocation: 'middle',
-        nameGap: 60,
-        nameTextStyle: { color: axisNameColor },
-        axisLabel: { color: axisLabelColor },
-      },
-      series: [
-        {
-          type: 'boxplot',
-          data: sortedBoxRows.map((b) => [
-            b.min,
-            b.q1,
-            b.median,
-            b.q3,
-            b.max,
-          ]),
-          itemStyle: {
-            color: CHART_COLORS.boxplot,
-            borderColor: CHART_COLORS.boxplot,
-          },
-        },
-      ],
-    };
-  }, [boxRows, baseTooltip, axisLabelColor, axisNameColor]);
-
-  // 5. Length vs Z-DNA Score (limited sample)
-  const lenScoreOpt = useMemo(() => {
-    if (!lenScore.length) return null;
-    return {
-      grid: commonGrid,
+    // 1. Site counts: 10 bins along one chromosome, or one bar per chromosome.
+    const countValues = viz.single ? viz.bins : chrSlots.map(s => s?.n ?? null);
+    const countTicks = ticksUpTo(COUNT_TICKS, Math.max(1_000, ...countValues.map(n => n ?? 0)));
+    const counts = countValues.length ? {
+      grid,
       tooltip: {
         ...baseTooltip,
         trigger: 'item',
-        extraCssText: 'max-width: 140px; white-space: nowrap;',
-        formatter: (p: any) =>
-          `Length: ${fmtNum(p.value[0])} bp\nScore: ${Number(
-            p.value[1]
-          ).toFixed(2)}`,
+        formatter: (p: ChartParam) => (p.data?.raw == null ? gapText : `Counts: ${fmtNum(Number(p.data.raw))}`),
+        extraCssText: 'white-space: nowrap;',
       },
-      xAxis: {
-        type: 'value',
-        name: 'Length (bp)',
-        nameLocation: 'middle',
-        nameGap: 35,
-        nameTextStyle: { color: axisNameColor },
-        axisLabel: {
-          formatter: (v: number) => fmtNum(v),
-          color: axisLabelColor,
+      xAxis: viz.single
+        ? {
+          type: 'category',
+          data: countValues.map((_, i) => String(i + 1)),
+          axisLine,
+          ...axisName(`${fmtBp(viz.binSize)} Bins`, 35),
+          axisLabel: { color: axisLabelColor },
+        }
+        : chrAxis,
+      yAxis: ladderAxis(countTicks, 'Counts'),
+      series: [{
+        type: 'bar',
+        data: countValues.map(n => (n == null ? { value: null } : { value: tickPosition(countTicks, n), raw: n })),
+        itemStyle: { color: CHART_COLORS.counts, ...barOutline },
+      }],
+    } : null;
+
+    // 3. / 5. Score or length: vs position (single chromosome) or per-chromosome bars.
+    const distribution = (
+      label: string, ladder: number[], pick: (d: Sample) => number,
+      statsOf: (s: ChrStat) => number[], scatterColor: string, barColor: string, unit: string,
+    ) => {
+      if (viz.single) {
+        if (!viz.sample.length) return null;
+        const ticks = ticksUpTo(ladder, Math.max(...viz.sample.map(pick)));
+        const lenMb = viz.chromLen > 0 ? viz.chromLen / 1e6 : Math.max(...viz.sample.map(d => d.pos)) / 1e6;
+        return {
+          grid,
+          tooltip: {
+            ...baseTooltip,
+            trigger: 'axis',
+            extraCssText: 'max-width: 240px; white-space: nowrap;',
+            formatter: (params: ChartParam[]) => {
+              const d = params[0]?.data ?? {};
+              return `Position: ${fmtNum(Number(d.pos))}\n${label}: ${fmtNum(Number(d.raw))}${unit}`;
+            },
+          },
+          xAxis: {
+            type: 'value',
+            min: 0,
+            max: lenMb,
+            interval: lenMb / 4,
+            axisLine,
+            ...axisName('Genomic position (Mb)', 35),
+            axisLabel: { formatter: (v: number) => fmtMb(v), color: axisLabelColor, showMaxLabel: true },
+          },
+          yAxis: ladderAxis(ticks, `Z-DNA ${label}`),
+          series: [{
+            type: 'scatter',
+            symbolSize: 8,
+            data: viz.sample.map(d => ({ value: [d.pos / 1e6, tickPosition(ticks, pick(d))], pos: d.pos, raw: pick(d) })),
+            itemStyle: { color: scatterColor },
+          }],
+        };
+      }
+      if (!viz.chrStats.length) return null;
+      // Linear axis from the minimum (score 50 / length 9) to just above the highest median.
+      const ticks = linearTicks(ladder[0], Math.max(...viz.chrStats.map(s => statsOf(s)[2])));
+      return {
+        grid,
+        tooltip: {
+          ...baseTooltip,
+          trigger: 'axis',
+          extraCssText: 'max-width: 200px; white-space: nowrap;',
+          formatter: (params: ChartParam[]) => {
+            const p = params[0];
+            if (!p.data?.stats) return gapText;
+            const [mn, q1, med, q3, mx] = p.data.stats as number[];
+            return [p.name, `Max: ${fmtNum(mx)}`, `Q3: ${fmtNum(q3)}`, `Median: ${fmtNum(med)}`,
+              `Q1: ${fmtNum(q1)}`, `Min: ${fmtNum(mn)}`].join('<br/>');
+          },
         },
-      },
-      yAxis: {
-        type: 'value',
-        name: 'Z-DNA Score',
-        nameLocation: 'middle',
-        nameGap: 45,
-        nameTextStyle: { color: axisNameColor },
-        axisLabel: { color: axisLabelColor },
-      },
-      series: [
-        {
+        xAxis: chrAxis,
+        yAxis: {
+          type: 'value',
+          min: ticks[0],
+          max: ticks[ticks.length - 1],
+          axisLine,
+          ...axisName(`Median Z-DNA ${label}`, yGap(ticks.map(fmtNum))),
+          axisTick: { customValues: ticks },
+          axisLabel: { customValues: ticks, color: axisLabelColor, formatter: (v: number) => fmtNum(v) },
+        },
+        series: [{
+          type: 'bar',
+          data: chrSlots.map(s => (s ? { value: statsOf(s)[2], stats: statsOf(s) } : { value: null })),
+          itemStyle: { color: barColor, ...barOutline },
+        }],
+      };
+    };
+
+    // 6. Length vs score on the same tick ladders as panels 3 and 5.
+    const lenScore = viz.sample.length ? (() => {
+      const xTicks = ticksUpTo(LENGTH_TICKS, Math.max(...viz.sample.map(d => d.len)));
+      const yTicks = ticksUpTo(SCORE_TICKS, Math.max(...viz.sample.map(d => d.score)));
+      return {
+        grid,
+        tooltip: {
+          ...baseTooltip,
+          trigger: 'item',
+          extraCssText: 'max-width: 140px; white-space: nowrap;',
+          formatter: (p: ChartParam) => `Length: ${fmtNum(Number(p.data?.len))} bp\nScore: ${fmtNum(Number(p.data?.score))}`,
+        },
+        xAxis: ladderXAxis(xTicks, 'Length (bp)'),
+        yAxis: ladderAxis(yTicks, 'Z-DNA Score'),
+        series: [{
           type: 'scatter',
           symbolSize: 5,
-          data: lenScore.map((d) => [d.len, d.score]),
-          itemStyle: {
-            color: CHART_COLORS.lenScore,
-          },
-        },
-      ],
-    };
-  }, [lenScore, baseTooltip, axisLabelColor, axisNameColor]);
+          data: viz.sample.map(d => ({ value: [tickPosition(xTicks, d.len), tickPosition(yTicks, d.score)], len: d.len, score: d.score })),
+          itemStyle: { color: CHART_COLORS.lenScore },
+        }],
+      };
+    })() : null;
 
-  // 6. Genomic distribution (random sample across genome)
-  const genomicDistOpt = useMemo(() => {
-    if (!genomicDist.length) return null;
     return {
-      grid: commonGrid,
-      tooltip: {
-        ...baseTooltip,
-        trigger: 'axis',
-        extraCssText: 'max-width: 240px; white-space: nowrap;',
-        formatter: (params: any) => {
-          const p = params[0];
-          return `Position: ${fmtNum(p.value[0])}\nScore: ${p.value[1].toFixed(
-            2
-          )}`;
-        },
-      },
-      xAxis: {
-        type: 'value',
-        name: 'Genomic Position (coordinate)',
-        nameLocation: 'middle',
-        nameGap: 35,
-        nameTextStyle: { color: axisNameColor },
-        axisLabel: {
-          formatter: (v: number) => fmtNum(v),
-          color: axisLabelColor,
-        },
-      },
-      yAxis: {
-        type: 'value',
-        name: 'Z-DNA Score',
-        nameLocation: 'middle',
-        nameGap: 60,
-        nameTextStyle: { color: axisNameColor },
-        axisLabel: { color: axisLabelColor },
-      },
-      series: [
-        {
-          type: 'scatter',
-          symbolSize: 8,
-          data: genomicDist.map((d) => [d.pos, d.score]),
-          itemStyle: {
-            color: CHART_COLORS.genomicDist,
-          },
-        },
-      ],
+      counts,
+      scoreHist: histogram(viz.scoreHist, 'Score', CHART_COLORS.scoreHist),
+      scoreDist: distribution('Score', SCORE_TICKS, d => d.score, s => s.score, CHART_COLORS.scoreScatter, CHART_COLORS.scoreBars, ''),
+      lenHist: histogram(viz.lenHist, 'Length (bp)', CHART_COLORS.lengthHist),
+      lenDist: distribution('Length', LENGTH_TICKS, d => d.len, s => s.length, CHART_COLORS.lengthDist, CHART_COLORS.lengthDist, ' bp'),
+      lenScore,
     };
-  }, [genomicDist, baseTooltip, axisLabelColor, axisNameColor]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viz, baseTooltip, axisLabelColor, axisNameColor, isDark]);
+
   /* -------------------------------------- UI ------------------------------------- */
+
+  // Selected values must keep the same object between renders: a new object on every
+  // keystroke makes Autocomplete treat it as a new selection and reset the typed text.
+  const speciesValue = useMemo(() => (species ? { label: species } : null), [species]);
+  const chrValue = useMemo(() => (chr ? { label: chr } : null), [chr]);
 
   const topScrollRef = useRef<HTMLDivElement>(null);
   const bottomScrollRef = useRef<HTMLDivElement>(null);
@@ -998,6 +883,21 @@ export default function Explorer() {
     target.scrollLeft = source.scrollLeft;
   };
 
+  const vizPanel = (title: string, option: Record<string, unknown> | null) => (
+    <Grid size={{ xs: 12, md: 6 }} sx={{ minWidth: 0 }}>
+      <Typography variant="subtitle2" sx={{ mb: 1, fontSize: VIZ_MUI_FONT.chartTitle }}>
+        {title}
+      </Typography>
+      {option ? (
+        <FullWidthChart option={option} height={400} deps={[tab, option]} />
+      ) : (
+        <Box sx={{ p: 2, border: '1px dashed', borderColor: 'divider', color: 'text.secondary', height: 400 }}>
+          {vizLoading ? 'Loading…' : 'No Z-DNA predictions for the current selection.'}
+        </Box>
+      )}
+    </Grid>
+  );
+
   return (
     <Box sx={{ p: 2 }}>
       <Typography variant="h6" sx={{ mb: 2 }}>Sequence search</Typography>
@@ -1005,11 +905,13 @@ export default function Explorer() {
       {/* Species + Locked Assembly banner */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <Grid container spacing={2} alignItems="center">
-          <Grid item xs={12} md={8} lg={6}>
+          <Grid>
             <Autocomplete
               options={speciesOpts}
               loading={loadingSpecies}
-              value={species ? { label: species } : null}
+              value={speciesValue}
+              inputValue={speciesInput}
+              isOptionEqualToValue={(o, v) => o.label === v.label}
               onChange={(_, v) => { setSpecies(v?.label ?? null); setChr(null); setChrInput(''); }}
               onInputChange={(_, v) => setSpeciesInput(v)}
               filterOptions={(x) => x}
@@ -1025,7 +927,7 @@ export default function Explorer() {
               )}
             />
           </Grid>
-          <Grid item xs={12} md={4} lg={6} sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+          <Grid sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
             {species && <Chip color="primary" label="Select" sx={{ display: 'none' }} />}
             {lockedAssembly && <Chip color="secondary" label={`Assembly: ${lockedAssembly}`} />}
           </Grid>
@@ -1037,11 +939,13 @@ export default function Explorer() {
         <Paper sx={{ p: 2, mb: 2 }}>
           <Grid container spacing={2} alignItems="center">
             {/* Chromosome */}
-            <Grid item xs={12} md={2} sx={{ marginRight: 2 }}>  {/* Added marginRight */}
+            <Grid sx={{ marginRight: 2 }}>  {/* Added marginRight */}
               <Autocomplete
                 options={chrOpts}
                 loading={loadingChr}
-                value={chr ? { label: chr } : null}
+                value={chrValue}
+                inputValue={chrInput}
+                isOptionEqualToValue={(o, v) => o.label === v.label}
                 onChange={(_, v) => setChr(v?.label ?? null)}
                 onInputChange={(_, v) => setChrInput(v)}
                 filterOptions={(x) => x}
@@ -1063,44 +967,44 @@ export default function Explorer() {
             </Grid>
 
             {/* Start */}
-            <Grid item xs={12} md={3} lg={2}>
+            <Grid>
               <TextField fullWidth label="Start ≥" type="number" value={startMin} onChange={(e) => setStartMin(e.target.value)} />
             </Grid>
-            <Grid item xs={12} md={3} lg={2}>
+            <Grid>
               <TextField fullWidth label="Start ≤" type="number" value={startMax} onChange={(e) => setStartMax(e.target.value)} />
             </Grid>
 
             {/* End */}
-            <Grid item xs={12} md={3} lg={2}>
+            <Grid>
               <TextField fullWidth label="End ≥" type="number" value={endMin} onChange={(e) => setEndMin(e.target.value)} />
             </Grid>
-            <Grid item xs={12} md={3} lg={2}>
+            <Grid>
               <TextField fullWidth label="End ≤" type="number" value={endMax} onChange={(e) => setEndMax(e.target.value)} />
             </Grid>
 
             {/* Z-DNA Score */}
-            <Grid item xs={12} md={3} lg={2}>
+            <Grid>
               <TextField fullWidth label="Z‑DNA Score ≥" type="number" value={scoreMin} onChange={(e) => setScoreMin(e.target.value)} />
             </Grid>
-            <Grid item xs={12} md={3} lg={2}>
+            <Grid>
               <TextField fullWidth label="Z‑DNA Score ≤" type="number" value={scoreMax} onChange={(e) => setScoreMax(e.target.value)} />
             </Grid>
 
             {/* Sequence contains */}
-            <Grid item xs={12} md={6} lg={4}>
+            <Grid>
               <TextField fullWidth label="Sequence contains" value={contains} onChange={(e) => setContains(e.target.value)} />
             </Grid>
 
             {/* Actions */}
-            <Grid item xs={12} md="auto">
+            <Grid>
               <Button variant="contained" onClick={onApply} disabled={!hasQueryContext}>APPLY</Button>
             </Grid>
-            <Grid item xs={12} md="auto">
+            <Grid>
               <Button onClick={onReset} disabled={!hasQueryContext}>RESET</Button>
             </Grid>
 
             {/* Export */}
-            <Grid item xs={12} md="auto">
+            <Grid>
               <Tooltip title="Export">
                 <span>
                   <Button startIcon={<DownloadIcon />} variant="outlined" disabled={!hasQueryContext} onClick={(e) => setExportAnchor(e.currentTarget)}>
@@ -1117,7 +1021,7 @@ export default function Explorer() {
               </Menu>
             </Grid>
 
-            <Grid item xs={12} md="auto">
+            <Grid>
               <Tooltip title="Reload suggestions">
                 <IconButton onClick={() => { /* optional */ }}>
                   <RefreshIcon />
@@ -1234,7 +1138,11 @@ export default function Explorer() {
                   {!rows.length && (
                     <TableRow>
                       <TableCell colSpan={5} align="center" sx={{ py: 6, color: 'text.secondary' }}>
-                        {hasQueryContext ? 'No rows — refine filters and click APPLY' : 'Select Species or open with ?assembly=...'}
+                        {!hasQueryContext
+                          ? 'Select Species or open with ?assembly=...'
+                          : contextPredictions === 0
+                            ? `0 Z-DNA predictions for ${lockedAssembly ? `assembly ${lockedAssembly}` : species}`
+                            : 'No rows — refine filters and click APPLY'}
                       </TableCell>
                     </TableRow>
                   )}
@@ -1257,110 +1165,22 @@ export default function Explorer() {
 
       {/* Visualizations */}
       {tab === 'viz' && (
-<Paper sx={{ p: 2 }}>
-  {/* ΕΠΙΒΟΛΗ 100% πλάτους στα wrappers του echarts-for-react */}
-  <Box sx={{
-    '& .echarts-for-react': { width: '100% !important' },
-    '& .echarts-for-react > div': { width: '100% !important' }
-  }}>
-    {/* Row 1 */}
-    <Grid container spacing={2} sx={{ mb: 2 }}>
-      <Grid item xs={12} md={6} sx={{ width: '45%' }}>
-        <Typography
-          variant="subtitle2"
-          sx={{ mb: 1, fontSize: VIZ_MUI_FONT.sectionTitle }}
-        >
-          Z-DNA Score — Histogram
-        </Typography>
-        <FullWidthChart option={histOpt} height={400} deps={[tab, histOpt]} />
-      </Grid>
-      <Grid item xs={12} md={6} sx={{ width: '45%' }}>
-        <Typography
-          variant="subtitle2"
-          sx={{ mb: 1, fontSize: VIZ_MUI_FONT.sectionTitle }}
-        >
-          Genomic Distribution
-        </Typography>
-        {genomicDistOpt ? (
-          <FullWidthChart option={genomicDistOpt} height={400} deps={[tab, genomicDistOpt]} />
-        ) : (
-          <Box sx={{ p: 2, border: '1px dashed', borderColor: 'divider', color: 'text.secondary', height: 400 }}>
-            No data available for genomic distribution plot.
-          </Box>
-        )}
-      </Grid>
-
-      {/* Row 1 */}
-      { /*}
-      <Grid item xs={12} md={6} sx={{ width: '45%' }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Top central 8-mers</Typography>
-        <FullWidthChart option={kmerOpt} height={400} deps={[tab, kmerOpt]} />
-      </Grid>
-      */ }
-    </Grid>
-
-    {/* Row 2 */}
-    <Grid container spacing={2} sx={{ mb: 2 }}>
-      <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
-        <Typography
-          variant="subtitle2"
-          sx={{ mb: 1, fontSize: VIZ_MUI_FONT.sectionTitle }}
-        >
-          Length vs Z-DNA Score (limited sample)
-        </Typography>
-        {lenScoreOpt ? (
-          <FullWidthChart option={lenScoreOpt} height={400} deps={[tab, lenScoreOpt]} />
-        ) : (
-          <Box sx={{ p: 2, border: '1px dashed', borderColor: 'divider', color: 'text.secondary', height: 400 }} />
-        )}
-      </Grid>
-      <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
-        <Typography
-          variant="subtitle2"
-          sx={{ mb: 1, fontSize: VIZ_MUI_FONT.sectionTitle }}
-        >
-          Z-DNA Score — per Chromosome (top by median)
-        </Typography>
-        {boxOpt ? (
-          <FullWidthChart option={boxOpt} height={400} deps={[tab, boxOpt]} />
-        ) : (
-          <Box sx={{ p: 2, border: '1px dashed', borderColor: 'divider', color: 'text.secondary', height: 400 }} />
-        )}
-      </Grid>
-    </Grid>
-
-    {/* Row 3 */}
-    <Grid container spacing={2}>
-      <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
-        <Typography
-          variant="subtitle2"
-          sx={{ mb: 1, fontSize: VIZ_MUI_FONT.sectionTitle }}
-        >
-          Z-DNA Density per 100 kb {chr ? `— ${chr}` : '(select chromosome)'}
-        </Typography>
-        {densityOpt ? (
-          <FullWidthChart option={densityOpt} height={400} deps={[tab, chr, densityOpt]} />
-        ) : (
-          <Box sx={{ p: 2, border: '1px dashed', borderColor: 'divider', color: 'text.secondary', height: 400 }} />
-        )}
-      </Grid>
-      <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
-        <Typography
-          variant="subtitle2"
-          sx={{ mb: 1, fontSize: VIZ_MUI_FONT.sectionTitle }}
-        >
-          Z-DNA Score across Genomic Positions {chr ? `— ${chr}` : '(select chromosome)'}
-        </Typography>
-        {scatterOpt ? (
-          <FullWidthChart option={scatterOpt} height={400} deps={[tab, chr, scatterOpt]} />
-        ) : (
-          <Box sx={{ p: 2, border: '1px dashed', borderColor: 'divider', color: 'text.secondary', height: 400 }} />
-        )}
-      </Grid>
-    </Grid>
-
-  </Box>
-</Paper>
+        <Paper sx={{ p: 2 }}>
+          <Grid container spacing={2}>
+            {vizPanel(viz?.single === false ? 'Z-DNA counts per chromosome' : 'Z-DNA counts (binned)', vizOptions.counts)}
+            {vizPanel('Z-DNA Score counts', vizOptions.scoreHist)}
+            {vizPanel(viz?.single === false ? 'Z-DNA Score distribution per chromosome' : 'Z-DNA Score distribution', vizOptions.scoreDist)}
+            {vizPanel('Z-DNA Length counts', vizOptions.lenHist)}
+            {vizPanel(viz?.single === false ? 'Z-DNA Length distribution per chromosome' : 'Z-DNA Length distribution', vizOptions.lenDist)}
+            {vizPanel('Z-DNA Length vs Score (sampled)', vizOptions.lenScore)}
+          </Grid>
+          {viz?.single === false && viz.hiddenChromosomes > 0 && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+              Per-chromosome panels show the {VIZ_CHROMOSOME_EDGE} chromosomes with the most and the {VIZ_CHROMOSOME_EDGE} with the fewest
+              Z-DNA predictions (ordered by count); "…" stands for the other {fmtNum(viz.hiddenChromosomes)}. Select a chromosome to see it on its own.
+            </Typography>
+          )}
+        </Paper>
       )}
     </Box>
   );

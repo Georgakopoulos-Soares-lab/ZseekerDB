@@ -1,12 +1,10 @@
 import * as React from 'react';
 import { ThemeProvider, createTheme, CssBaseline } from '@mui/material';
 import { alpha } from '@mui/material/styles';
-import type { PaletteMode } from '@mui/material'; // <- type-only import (σημαντικό)
+import type { PaletteMode } from '@mui/material';
 import { MUI_BASE_FONT_SIZE } from './utils/typographyScale';
+import { ColorModeContext, type Ctx } from './colorMode';
 
-type Ctx = { mode: PaletteMode; toggle: () => void };
-export const ColorModeContext = React.createContext<Ctx>({ mode: 'dark', toggle: () => {} });
-export const useColorMode = () => React.useContext(ColorModeContext);
 
 function getTheme(mode: PaletteMode) {
   const isLight = mode === 'light';

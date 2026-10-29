@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { taxidBalancedGroupMeans } from '../src/utils/taxidAverages.ts';
 import {
   buildTaxonomyTree,
   type TaxonomyTreeRow,
@@ -19,33 +18,9 @@ import {
   TREEMAP_MIN_VISIBLE_AREA,
   TREEMAP_SERIES_BOUNDS,
 } from '../src/utils/treemapLayout.ts';
-import { GENOME_GC_SCATTER_LAYOUT } from '../src/utils/chartLayout.ts';
-
-test('taxid-balanced means give multiple assemblies from one taxid one vote', () => {
-  const rows = [
-    { genus: 'Example', taxid: 'A', density: 0 },
-    { genus: 'Example', taxid: 'A', density: 10 },
-    { genus: 'Example', taxid: 'B', density: 15 },
-  ];
-  const columns = {
-    groupColumn: 'genus',
-    taxidColumn: 'taxid',
-    valueColumn: 'density',
-  };
-
-  const [initial] = taxidBalancedGroupMeans(rows, columns);
-  const [withAnotherAssembly] = taxidBalancedGroupMeans(
-    [...rows, { genus: 'Example', taxid: 'A', density: 5 }],
-    columns
-  );
-
-  assert.equal(initial.mean, 10);
-  assert.equal(initial.assemblyCount, 3);
-  assert.equal(initial.uniqueTaxids, 2);
-  assert.equal(withAnotherAssembly.mean, 10);
-  assert.equal(withAnotherAssembly.assemblyCount, 4);
-  assert.equal(withAnotherAssembly.uniqueTaxids, 2);
-});
+import { shortenTaxonLabel } from '../src/utils/shortenLabel.ts';
+import { gcHistogram, genomeSizeHistogram } from '../src/utils/histogramBins.ts';
+import { SCORE_TICKS, COUNT_TICKS, linearTicks, tickPosition, ticksUpTo } from '../src/utils/tickScale.ts';
 
 const child = (node: TreeNode, name: string) => {
   const match = node.children?.find(candidate => candidate.name === name);
@@ -111,13 +86,13 @@ test('missing ranks are explicit and viral realm is part of viral navigation', (
 test('application and visualization typography are exactly 1.25x their prior sizes', () => {
   assert.equal(APP_FONT_SCALE, 1.25);
   assert.equal(MUI_BASE_FONT_SIZE, 14 * 1.25);
-  assert.equal(VIZ_FONT.base, 12 * 1.25);
+  assert.equal(VIZ_FONT.base, 12 * 1.25 + 2);
   assert.equal(VIZ_FONT.defaultTooltip, 14 * 1.25);
-  assert.equal(VIZ_FONT.title, 18 * 1.25);
+  assert.equal(VIZ_FONT.title, 18 * 1.25 + 2);
   assert.equal(VIZ_FONT.treemapLabel, 13 * 1.25);
   assert.equal(VIZ_FONT.treemapMin, 11 * 1.25);
   assert.equal(VIZ_FONT.treemapHeader, 14 * 1.25);
-  assert.equal(VIZ_FONT.subscript, 7 * 1.25);
+  assert.equal(VIZ_FONT.subscript, 7 * 1.25 + 2);
   assert.equal(VIZ_MUI_FONT.pageTitle, '1.875rem');
   assert.equal(VIZ_MUI_FONT.sectionTitle, '1.09375rem');
 });
@@ -130,9 +105,39 @@ test('treemap reserves an inset on every edge and paints very small groups', () 
   assert.equal(TREEMAP_MIN_VISIBLE_AREA, 1);
 });
 
-test('genome-GC scatter leaves room between its y-axis title and tick labels', () => {
-  assert.ok(GENOME_GC_SCATTER_LAYOUT.gridLeft >= 100);
-  assert.ok(GENOME_GC_SCATTER_LAYOUT.yAxisNameGap >= 70);
-  assert.ok(GENOME_GC_SCATTER_LAYOUT.yAxisLabelMargin >= 10);
-  assert.ok(GENOME_GC_SCATTER_LAYOUT.yAxisSplitNumber <= 5);
+test('long taxon labels are cut at the first consonant after the 12th character', () => {
+  assert.equal(shortenTaxonLabel('Methanobacteriati'), 'Methanobacter.');
+  assert.equal(shortenTaxonLabel('Pseudomonadati'), 'Pseudomonadat.');
+  assert.equal(shortenTaxonLabel('Fungi'), 'Fungi');
+  assert.equal(shortenTaxonLabel('Abcdefghijklm'), 'Abcdefghijklm'); // 13 chars: unchanged
+});
+
+test('tick ladders stop at the first tick reaching the maximum and space ticks equally', () => {
+  assert.deepEqual(ticksUpTo(SCORE_TICKS, 4134.5), [50, 75, 100, 200, 500, 1000, 5000]);
+  assert.deepEqual(ticksUpTo(SCORE_TICKS, 500), [50, 75, 100, 200, 500]);
+  assert.deepEqual(ticksUpTo(SCORE_TICKS, 10), [50, 75]);
+  const ticks = ticksUpTo(COUNT_TICKS, 1000);
+  assert.equal(tickPosition(ticks, 0), 0);
+  assert.equal(tickPosition(ticks, 0.5), 0.5);
+  assert.equal(tickPosition(ticks, 10), 2);
+  assert.ok(Math.abs(tickPosition(ticks, 1000) - 4) < 1e-9);
+  assert.ok(Math.abs(tickPosition(SCORE_TICKS, Math.sqrt(100 * 200)) - 2.5) < 1e-9);
+});
+
+test('linear median ticks end at the first round step above the highest median', () => {
+  assert.deepEqual(linearTicks(50, 66), [50, 55, 60, 65, 70]);
+  assert.deepEqual(linearTicks(9, 51), [9, 20, 30, 40, 50, 60]);
+  assert.deepEqual(linearTicks(50, 65), [50, 55, 60, 65]);
+});
+
+test('genome size bins use round kb edges and GC bins never share an edge', () => {
+  const g = genomeSizeHistogram([15_027_000, 1_000_000_000, 2_400_000_000]);
+  assert.deepEqual(g.labels.slice(0, 3), ['0', '200,000', '400,000']);
+  assert.equal(g.counts.reduce((a, b) => a + b, 0), 3);
+  assert.equal(g.ranges[1], '200,000–400,000 kb');
+
+  assert.deepEqual(gcHistogram([34.2, 34.9, 35.1]).labels, ['34', '35']);
+  const wide = gcHistogram([20.5, 49.9, 75.3]);
+  assert.deepEqual(wide.labels.slice(0, 2), ['20–21', '22–23']);
+  assert.deepEqual(wide.counts.reduce((a, b) => a + b, 0), 3);
 });

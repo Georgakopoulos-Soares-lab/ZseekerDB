@@ -1,5 +1,5 @@
 // src/pages/HelpDocs.tsx
-import { useMemo, useState, useRef, useEffect } from 'react';
+import { useMemo, useState, useRef, useEffect, type ReactElement } from 'react';
 import {
   Box,
   Container,
@@ -17,7 +17,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 type Section = {
   id: string;
   title: string;
-  body: JSX.Element;
+  body: ReactElement;
   defaultExpanded?: boolean;
 };
 
@@ -78,17 +78,19 @@ export default function HelpDocs() {
               → Family → Genus → Species</i>). Viral lineages also include <i>Viral realm</i>.
               Missing ranks are shown as explicit <i>Unclassified …</i> nodes. Use the complete
               breadcrumb path to navigate back; each tooltip identifies the node rank and reports
-              assembly and unique-taxid counts separately.
+              assembly and unique species-taxid counts separately.
             </Typography>
             <Typography variant="body2" color="text.secondary">
               Tip: For very large categories, the treemap shows only the <b>Top‑30</b> nodes per
               level so it remains readable.
             </Typography>
             <Typography paragraph sx={{ mt: 2 }}>
-              Group-level Z-DNA/-RNA density summaries use a two-stage taxid-balanced mean.
-              Assembly densities are first averaged within each taxonomy identifier; those
-              per-taxid means are then averaged within the displayed taxonomic group. Each unique
-              taxid therefore contributes equally, regardless of its assembly or strain count.
+              Group-level Z-DNA density, genome size and GC summaries use a two-stage
+              taxid-balanced mean. Assembly values are first averaged within each species
+              taxonomy identifier (NCBI species taxid); those per-taxid means are then averaged
+              within the displayed taxonomic group. Each unique species taxid therefore
+              contributes equally, regardless of its assembly or strain count. Assemblies with
+              no predictions count with a density of 0.
             </Typography>
           </>
         ),
@@ -99,8 +101,9 @@ export default function HelpDocs() {
         body: (
           <>
             <Typography paragraph>
-              Start typing in the <b>Specie</b> field. Suggestions come from the
-              <code> tax_names</code> table or (fallback) from <code>metadata</code>. After
+              Start typing in the <b>Specie</b> field. Suggestions include every species in the
+              release metadata, including species whose assemblies have no predicted Z-DNA (the
+              results table then reports 0 Z-DNA predictions). After
               selecting a species, the <b>Chromosome</b> field is limited to chromosomes available
               in assemblies for that species.
             </Typography>
@@ -144,28 +147,34 @@ export default function HelpDocs() {
       },
       {
         id: 'viz-tab',
-        title: 'Visualizations Tab (Histogram / Density / Scatter / Box / k‑mers)',
+        title: 'Visualizations Tab',
         body: (
           <>
+            <Typography paragraph>
+              The tab shows six panels. With a chromosome selected (or for genomes with a single
+              chromosome/contig) they describe that chromosome; otherwise they are genome‑wide.
+            </Typography>
             <ul style={{ marginLeft: 16 }}>
               <li>
-                <b>Histogram:</b> Distribution of Z‑DNA Score (bins of 10).
+                <b>Z‑DNA counts:</b> number of predicted Z‑DNA sites in 10 equal bins along the
+                chromosome, or one bar per chromosome genome‑wide.
               </li>
               <li>
-                <b>Density (100kb windows):</b> Requires a selected chromosome; shows counts per
-                100,000bp window.
+                <b>Z‑DNA Score counts / Length counts:</b> histograms of scores (bins of 10) and
+                lengths (bins of 10 bp from the 9 bp minimum).
               </li>
               <li>
-                <b>Start vs Score (scatter):</b> Sampled points (e.g., 20k) for speed.
+                <b>Z‑DNA Score / Length distribution:</b> each prediction by genomic position (Mb)
+                for one chromosome (sampled); genome‑wide, the median per chromosome, with
+                min/quartiles/max on hover.
               </li>
               <li>
-                <b>Box plot per chromosome:</b> Compare score distributions across chromosomes (Top
-                15 by median).
-              </li>
-              <li>
-                <b>Top central 8‑mers:</b> Most frequent 8‑mers around the center of each sequence.
+                <b>Length vs Score:</b> a deterministic sample of up to 20,000 predictions.
               </li>
             </ul>
+            <Typography variant="body2" color="text.secondary">
+              Genome‑wide panels show every chromosome up to 25; beyond that, the 12 with the most and the 12 with the fewest predictions, separated by a “…” bin.
+            </Typography>
           </>
         ),
       },
@@ -195,7 +204,6 @@ export default function HelpDocs() {
     sections.forEach(s => (init[s.id] = !!s.defaultExpanded));
     return init;
   });
-  const allOpen = Object.values(expanded).every(Boolean);
   const toggleAll = (value: boolean) => {
     const next: Record<string, boolean> = {};
     sections.forEach(s => (next[s.id] = value));
@@ -264,7 +272,7 @@ export default function HelpDocs() {
       {/* Accordions */}
       <Box>
         {sections.map(s => (
-          <Box key={s.id} ref={(el) => (refs.current[s.id] = el)}>
+          <Box key={s.id} ref={(el: HTMLDivElement | null) => { refs.current[s.id] = el; }}>
             <Accordion
               disableGutters
               square

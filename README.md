@@ -34,29 +34,45 @@ routes return HTTP 503 with the configured database path. Once the file is
 present, restart/redeploy the service and it will open the database.
 
 The DuckDB database is the only required runtime dataset excluded from Git.
-`data/metadata.tsv`, `imported_metadata.csv`, and `import_log.txt` are already
-tracked in the repository, although the application serves data from DuckDB.
+`data/metadata.tsv.gz`, `imported_metadata.csv`, and `import_log.txt` are already
+tracked in the repository. `data/metadata.tsv.gz` (gzip, because the plain TSV exceeds GitHub's 100 MB file limit;
+DuckDB reads it directly) is the authoritative metadata:
+it lists all release assemblies, including those with no predictions, whereas
+the DuckDB `metadata` table only holds assemblies with predictions. At startup
+the backend attaches the DuckDB file **read-only**, exposes its tables under
+their usual names, and loads the TSV into an in-memory `metadata` table (same
+column mapping as `scripts/migrate/release.py`, without `is_t2t`/`has_gff`,
+which are intentionally not part of the metadata, and with `genome_size_manual`
+as the only genome size; the TSV's raw `genome_size` is not loaded). The Docker image copies the
+TSV to `/app/data/metadata.tsv.gz`; override the path with `METADATA_GLOB`. If the TSV cannot be loaded, the service starts
+degraded like a missing database file.
 
 ## API endpoints
 
-This version adds routes expected by your current React UI:
-- `GET /api/zdna/search` → returns rows from `zdna` (Chromosome/Start/End/Z-DNA Score/Sequence)
-- `GET /api/metadata/list` and `/api/metadata/list2` → returns rows from `metadata`
-- `GET /api/metadata/classes/top` → returns top frequent values for a categorical column (prefers `organism` if present)
+Used by the React UI:
+- `GET /api/home/insights` → homepage KPIs and charts (computed once at startup)
+- `GET /api/metadata/list`, `/api/metadata/export`, `/api/metadata/charts`, `/api/metadata/distinct` →
+  Species browser table, downloads (csv/tsv/json/xml/xls), charts and filter options; all take the same
+  taxonomy/range filter parameters
+- `GET|POST /api/sql` → runs **one SELECT statement** (validated with DuckDB's parser; anything else,
+  including several statements, is rejected). After startup the engine's file/network access is switched
+  off and the configuration locked, so queries cannot read server files or undo this.
 
-Existing routes remain:
+Other routes:
 - `GET /api/health`
-- `POST /api/admin/init`
-- `GET /api/metadata`, `GET /api/zdna` (generic with filters)
-- `GET /api/columns/:table`
-- `POST /api/sql` (SELECT/EXPLAIN/DESCRIBE only)
+- `GET /api/zdna/search`, `/api/zdna/export`, `/api/zdna/score_histogram` → raw predictions for one
+  assembly; `assembly_eq=<accession>` is required (without it a request would scan all ~2.5 billion rows)
+- `GET /api/zdna/distinct_chr`, `/api/metadata/classes/top`, `/api/metadata/preview`, `/api/zdna/preview`
+- `POST /api/admin/init` → recreates views; disabled unless `ADMIN_TOKEN` is set, and then requires the
+  same value in the `X-Admin-Token` header
 
 Local default paths (change in `.env`):
 ```
 DUCKDB_PATH          = data/zdnadatabase.duckdb
-METADATA_GLOB        = data/metadata.tsv
+METADATA_GLOB        = data/metadata.tsv.gz
 DUCKDB_THREADS       = 6
 HOST                 = 0.0.0.0
 PORT                 = 8080
 CORS_ORIGIN          = http://localhost:5173,http://localhost:3000
+ADMIN_TOKEN          = (unset: /api/admin/init disabled)
 ```

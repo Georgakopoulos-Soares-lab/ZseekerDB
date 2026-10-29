@@ -4,11 +4,14 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"os"
@@ -22,15 +25,15 @@ import (
 	"github.com/joho/godotenv"
 	_ "github.com/marcboeker/go-duckdb"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 )
 
 type Config struct {
-	DBPath    string
-	StaticDir string
-	Threads   int
-	// (κρατιούνται για συμβατότητα, δεν χρησιμοποιούνται πλέον)
-	ZdnaParquet   string
+	DBPath        string
+	StaticDir     string
+	Threads       int
 	MetadataGlob  string
+	AdminToken    string
 	TempDir       string
 	MaxTempGiB    int
 	MemoryLimitGB int
@@ -52,7 +55,10 @@ func loadConfig() (*Config, error) {
 	// with a persistent-volume path such as /data/zdnadatabase.duckdb.
 	cfg.DBPath = get("DUCKDB_PATH", "data/zdnadatabase.duckdb")
 	cfg.StaticDir = get("STATIC_DIR", "frontend/dist")
-	cfg.MetadataGlob = get("METADATA_GLOB", "")
+	// Full release metadata (all assemblies, incl. those with 0 predictions).
+	// The DuckDB metadata table only holds assemblies with predictions.
+	cfg.MetadataGlob = get("METADATA_GLOB", "data/metadata.tsv.gz")
+	cfg.AdminToken = get("ADMIN_TOKEN", "")
 	cfg.TempDir = get("DUCKDB_TEMP_DIR", "data/tmp")
 	if p, err := strconv.Atoi(get("DUCKDB_MAX_TEMP_GIB", "50")); err == nil {
 		cfg.MaxTempGiB = p
@@ -95,8 +101,11 @@ type Server struct {
 	dbErr error
 }
 
+// openDuckDB opens an in-memory DuckDB, attaches the release file read-only as
+// "zdb" and exposes its objects under their usual names, except metadata, which
+// is loaded from the full release TSV (see loadReleaseMetadata).
 func openDuckDB(cfg *Config) (*sql.DB, error) {
-	dsn := fmt.Sprintf("%s?threads=%d", cfg.DBPath, cfg.Threads)
+	dsn := fmt.Sprintf("?threads=%d", cfg.Threads)
 	db, err := sql.Open("duckdb", dsn)
 	if err != nil {
 		return nil, err
@@ -112,19 +121,146 @@ func openDuckDB(cfg *Config) (*sql.DB, error) {
 	db.Exec(fmt.Sprintf("PRAGMA temp_directory = '%s'", sqlQuote(td)))
 	db.Exec(fmt.Sprintf("PRAGMA max_temp_directory_size = '%dGB'", cfg.MaxTempGiB))
 	db.Exec(fmt.Sprintf("PRAGMA memory_limit = '%dGB'", cfg.MemoryLimitGB))
+
+	if _, err := db.Exec(fmt.Sprintf("ATTACH '%s' AS zdb (READ_ONLY)", sqlQuote(normalizePath(cfg.DBPath)))); err != nil {
+		db.Close()
+		return nil, err
+	}
+	rows, err := db.Query(`
+		SELECT table_name FROM duckdb_tables() WHERE database_name = 'zdb' AND schema_name = 'main'
+		UNION ALL
+		SELECT view_name FROM duckdb_views() WHERE database_name = 'zdb' AND schema_name = 'main' AND NOT internal`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			db.Close()
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	rows.Close()
+	for _, n := range names {
+		// metadata comes from the TSV; zdna is recreated over the data view below.
+		if n == "metadata" || n == "metadata_view" || n == "zdna" {
+			continue
+		}
+		src := "SELECT * FROM zdb.main." + quoteIdent(n)
+		if n == "data" {
+			src = `SELECT * REPLACE (` + chromosomeDisplaySQL + ` AS "Chromosome") FROM zdb.main.data`
+		}
+		if _, err := db.Exec(fmt.Sprintf("CREATE VIEW %s AS %s", quoteIdent(n), src)); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if err := loadReleaseMetadata(db, cfg); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("loading metadata from %s: %w", cfg.MetadataGlob, err)
+	}
+	if err := lockDownEngine(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
 }
 
-// Αν υπάρχει ήδη table/view 'zdna', δεν κάνουμε τίποτα.
-// Αν ΔΕΝ υπάρχει αλλά υπάρχει table 'data', εκθέτουμε view 'zdna' πάνω στο 'data'.
+// lockDownEngine runs once all files are loaded. Queries (including those sent to the
+// public /api/sql endpoint) can then no longer read or write files or the network, and
+// lock_configuration stops a query from switching that back on.
+func lockDownEngine(db *sql.DB) error {
+	for _, stmt := range []string{"SET enable_external_access = false", "SET lock_configuration = true"} {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	return nil
+}
+
+// UCSC-style names for the human T2T assembly's chromosomes (NCBI RefSeq -> 1..22, X, Y).
+// Only this assembly is renamed; every other assembly keeps its sequence accessions.
+const humanT2TAssembly = "GCF_009914755.1"
+
+var humanT2TChromosomes = [][2]string{
+	{"NC_060925.1", "1"}, {"NC_060926.1", "2"}, {"NC_060927.1", "3"}, {"NC_060928.1", "4"},
+	{"NC_060929.1", "5"}, {"NC_060930.1", "6"}, {"NC_060931.1", "7"}, {"NC_060932.1", "8"},
+	{"NC_060933.1", "9"}, {"NC_060934.1", "10"}, {"NC_060935.1", "11"}, {"NC_060936.1", "12"},
+	{"NC_060937.1", "13"}, {"NC_060938.1", "14"}, {"NC_060939.1", "15"}, {"NC_060940.1", "16"},
+	{"NC_060941.1", "17"}, {"NC_060942.1", "18"}, {"NC_060943.1", "19"}, {"NC_060944.1", "20"},
+	{"NC_060945.1", "21"}, {"NC_060946.1", "22"}, {"NC_060947.1", "X"}, {"NC_060948.1", "Y"},
+}
+
+// chromosomeDisplaySQL is the "Chromosome" expression of the data view.
+var chromosomeDisplaySQL = func() string {
+	var b strings.Builder
+	b.WriteString(`CASE WHEN assembly = '` + humanT2TAssembly + `' THEN CASE "Chromosome"`)
+	for _, m := range humanT2TChromosomes {
+		b.WriteString(fmt.Sprintf(" WHEN '%s' THEN '%s'", m[0], m[1]))
+	}
+	b.WriteString(` ELSE "Chromosome" END ELSE "Chromosome" END`)
+	return b.String()
+}()
+
+// loadReleaseMetadata builds the in-memory metadata table from the release TSV,
+// with the same TSV->DB column mapping as scripts/migrate/release.py, but keeping
+// assemblies without predictions (0 is a valid density). T2T status and has_gff
+// are intentionally not part of the metadata.
+func loadReleaseMetadata(db *sql.DB, cfg *Config) error {
+	t := func(c string) string { return fmt.Sprintf("nullif(m.%s,'')", c) }
+	na := func(c string) string { return fmt.Sprintf("nullif(nullif(m.%s,''),'na')", c) }
+	big := func(c string) string { return fmt.Sprintf("TRY_CAST(m.%s AS BIGINT)", c) }
+	_, err := db.Exec(`
+	CREATE TABLE metadata AS
+	SELECT
+		m.assembly_accession                      AS assembly,
+		` + big("ncbi_summary_taxid") + `         AS taxid,
+		CASE m.resolve_level WHEN 'complete' THEN 'Complete Genome'
+		                     WHEN 'chromosome' THEN 'Chromosome'
+		                     ELSE ` + t("resolve_level") + ` END AS assembly_level,
+		TRY_CAST(m.gc_percent AS DOUBLE)          AS gc_percent,
+		` + t("superkingdom") + `                 AS superkingdom,
+		` + t("kingdom") + `                      AS kingdom,
+		` + t("phylum") + `                       AS phylum,
+		` + t("class") + `                        AS class,
+		` + t(`"order"`) + `                      AS "order",
+		` + t("family") + `                       AS family,
+		` + t("genus") + `                        AS genus,
+		` + t("tax_name") + `                     AS tax_name,
+		` + t("viral_realm") + `                  AS viral_realm,
+		` + t("updated_tax_name") + `             AS updated_tax_name,
+		` + big("total_z_bases") + `              AS obs_zbp,
+		-- TSV z_density is a fraction (total_z_bases / genome_size_manual); app shows per kb
+		TRY_CAST(m.z_density AS DOUBLE) * 1000    AS obs_density_per_kb,
+		` + big("z_predictions_count") + `        AS obs_n_zdna,
+		` + big("ncbi_summary_species_taxid") + ` AS species_taxid,
+		` + t("organism_name") + `                AS organism_name,
+		` + t("species") + `                      AS species,
+		` + na("infraspecific_name") + `          AS infraspecific_name,
+		` + big("genome_size_ungapped") + `       AS genome_size_ungapped,
+		` + big("genome_size_manual") + `         AS genome_size_manual,
+		` + big("replicon_count") + `             AS replicon_count,
+		` + big("scaffold_count") + `             AS scaffold_count,
+		` + big("contig_count") + `               AS contig_count,
+		TRY_CAST(m.reference_genome AS BOOLEAN)   AS reference_genome,
+		` + na("paired_asm_comp") + `             AS paired_asm_comp
+	FROM read_csv('` + sqlQuote(normalizePath(cfg.MetadataGlob)) + `', delim='\t', header=true, all_varchar=true) m
+	ORDER BY m.assembly_accession`)
+	return err
+}
+
 func (s *Server) createOrReplaceViews() error {
 	var cnt int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM information_schema.tables WHERE LOWER(table_name)='zdna'`).Scan(&cnt)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM information_schema.tables WHERE LOWER(table_name)='zdna' AND table_catalog=current_database()`).Scan(&cnt)
 	if cnt > 0 {
-		return nil // υπάρχει ήδη base table 'zdna'
+		return nil
 	}
 	var hasData int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM information_schema.tables WHERE LOWER(table_name)='data'`).Scan(&hasData)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM information_schema.tables WHERE LOWER(table_name)='data' AND table_catalog=current_database()`).Scan(&hasData)
 	if hasData > 0 {
 		_, err := s.db.Exec(`
 CREATE OR REPLACE VIEW zdna AS
@@ -136,28 +272,33 @@ SELECT "Chromosome","Start","End","Z-DNA Score","Sequence", "assembly" AS "Assem
 
 // ---------- home insights: single cached endpoint ----------
 
-type insightsCacheEntry struct {
-	mu      sync.Mutex
-	payload []byte
-	expiry  time.Time
-}
+// Every input (the release DuckDB file and metadata TSV) is fixed for the life of
+// the process, so the insights payload is computed once (warmed at startup) and
+// then served from memory.
+var (
+	insightsMu      sync.Mutex
+	insightsPayload []byte
+	insightsFlight  singleflight.Group
+)
 
-var insightsCached insightsCacheEntry
-
+// Top kingdoms by species-taxid-balanced mean density: assembly densities
+// (0 for assemblies without predictions) are averaged per species taxid, then
+// those means are averaged per kingdom. Unclassified kingdoms are excluded.
 const homeTopKingdomsQuery = `
 	WITH per_taxid AS (
 		SELECT
 			kingdom,
-			taxid,
+			species_taxid,
 			AVG(TRY_CAST(obs_density_per_kb AS DOUBLE)) AS taxid_density,
 			COUNT(*) AS assembly_count,
 			COALESCE(MAX(superkingdom), '(unknown)') AS superkingdom
 		FROM metadata
 		WHERE kingdom IS NOT NULL AND kingdom <> ''
-		  AND taxid IS NOT NULL
+		  AND kingdom NOT ILIKE '%unclassified%'
+		  AND species_taxid IS NOT NULL
 		  AND obs_density_per_kb IS NOT NULL
-		  AND genome_size >= 1000
-		GROUP BY kingdom, taxid
+		  AND genome_size_manual >= 1000
+		GROUP BY kingdom, species_taxid
 	)
 	SELECT
 		kingdom AS label,
@@ -170,9 +311,25 @@ const homeTopKingdomsQuery = `
 	ORDER BY density DESC
 	LIMIT 10`
 
-// serveJSON writes JSON with optional gzip and browser-cache headers.
+// Score histogram over a species-taxid-balanced sample: each species taxid
+// contributes about scoreSamplePerTaxid predictions (all of them if it has
+// fewer). Rows are picked by a hash, so the sample is deterministic.
+const scoreSamplePerTaxid = 4
+
+var homeScoreHistogramQuery = fmt.Sprintf(`
+	SELECT FLOOR(d."Z-DNA Score"/10)*10 AS bin, COUNT(*) AS n
+	FROM data d
+	JOIN (
+		SELECT assembly, %d.0 / SUM(obs_n_zdna) OVER (PARTITION BY species_taxid) AS rate
+		FROM metadata WHERE obs_n_zdna > 0
+	) m USING (assembly)
+	WHERE (hash(d.assembly, d."Start") %% 1000000) < m.rate * 1000000
+	GROUP BY 1 ORDER BY 1`, scoreSamplePerTaxid)
+
+// serveJSON writes JSON with optional gzip. Browsers must not reuse a stored copy:
+// the payload is already served from memory, and a stale copy outlives redeploys.
 func serveJSON(c *gin.Context, payload []byte) {
-	c.Header("Cache-Control", "public, max-age=900")
+	c.Header("Cache-Control", "no-cache")
 	if strings.Contains(c.Request.Header.Get("Accept-Encoding"), "gzip") {
 		var buf bytes.Buffer
 		gz, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
@@ -187,20 +344,54 @@ func serveJSON(c *gin.Context, payload []byte) {
 }
 
 func (s *Server) homeInsights(c *gin.Context) {
-	// Serve from cache if still fresh.
-	insightsCached.mu.Lock()
-	if insightsCached.payload != nil && time.Now().Before(insightsCached.expiry) {
-		payload := insightsCached.payload
-		insightsCached.mu.Unlock()
+	insightsMu.Lock()
+	payload := insightsPayload
+	insightsMu.Unlock()
+	if payload != nil {
 		c.Header("X-Cache", "HIT")
 		serveJSON(c, payload)
 		return
 	}
-	insightsCached.mu.Unlock()
+	payload, err := s.loadInsights()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.Header("X-Cache", "MISS")
+	serveJSON(c, payload)
+}
 
+// loadInsights computes the insights payload once; concurrent callers share the
+// in-flight computation. Failures are not cached, so the next request retries.
+func (s *Server) loadInsights() ([]byte, error) {
+	v, err, _ := insightsFlight.Do("insights", func() (any, error) {
+		insightsMu.Lock()
+		cached := insightsPayload
+		insightsMu.Unlock()
+		if cached != nil {
+			return cached, nil
+		}
+		payload, err := s.computeInsights()
+		if err != nil {
+			log.Println("homeInsights error:", err)
+			return nil, err
+		}
+		insightsMu.Lock()
+		insightsPayload = payload
+		insightsMu.Unlock()
+		return payload, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.([]byte), nil
+}
+
+func (s *Server) computeInsights() ([]byte, error) {
 	type KV struct {
-		Label string  `json:"label"`
-		N     float64 `json:"n"`
+		Label  string  `json:"label"`
+		N      float64 `json:"n"`
+		Taxids int64   `json:"taxids"`
 	}
 	type TopKV struct {
 		Label         string  `json:"label"`
@@ -213,11 +404,6 @@ func (s *Server) homeInsights(c *gin.Context) {
 		Bin float64 `json:"bin"`
 		N   int64   `json:"n"`
 	}
-	type ScatterPt struct {
-		GS float64 `json:"gs"`
-		GC float64 `json:"gc"`
-		SK string  `json:"sk"`
-	}
 	type KPIs struct {
 		TotalAssemblies int64   `json:"total_assemblies"`
 		UniqueTaxids    int64   `json:"unique_taxids"`
@@ -225,11 +411,10 @@ func (s *Server) homeInsights(c *gin.Context) {
 		AvgGC           float64 `json:"avg_gc"`
 	}
 	type InsightsResponse struct {
-		KPIs          KPIs        `json:"kpis"`
-		Superkingdoms []KV        `json:"superkingdoms"`
-		TopKingdoms   []TopKV     `json:"top_kingdoms"`
-		Histogram     []HistBin   `json:"histogram"`
-		Scatter       []ScatterPt `json:"scatter"`
+		KPIs          KPIs      `json:"kpis"`
+		Superkingdoms []KV      `json:"superkingdoms"`
+		TopKingdoms   []TopKV   `json:"top_kingdoms"`
+		Histogram     []HistBin `json:"histogram"`
 	}
 
 	var (
@@ -237,20 +422,26 @@ func (s *Server) homeInsights(c *gin.Context) {
 		skRows   []KV
 		topRows  []TopKV
 		histRows []HistBin
-		scRows   []ScatterPt
 	)
 
-	// Run all five queries concurrently — total wall-time ≈ slowest query, not sum.
+	// Run all queries concurrently — total wall-time ≈ slowest query, not sum.
 	var g errgroup.Group
 
 	g.Go(func() error {
 		var gs, gc sql.NullFloat64
 		var ta, ut sql.NullInt64
+		// Genome size and GC are species-taxid-balanced: mean per species taxid,
+		// then mean of those means.
 		err := s.db.QueryRow(`
-			SELECT COUNT(*), COUNT(DISTINCT taxid),
-			       AVG(TRY_CAST(genome_size AS DOUBLE)),
-			       AVG(TRY_CAST(gc_percent  AS DOUBLE))
-			FROM metadata WHERE genome_size >= 1000`).Scan(&ta, &ut, &gs, &gc)
+			SELECT SUM(n), COUNT(species_taxid), AVG(gs), AVG(gc)
+			FROM (
+				SELECT species_taxid,
+				       COUNT(*) AS n,
+				       AVG(TRY_CAST(genome_size_manual AS DOUBLE)) AS gs,
+				       AVG(TRY_CAST(gc_percent AS DOUBLE)) AS gc
+				FROM metadata
+				GROUP BY 1
+			) t`).Scan(&ta, &ut, &gs, &gc)
 		if err != nil {
 			return err
 		}
@@ -265,8 +456,9 @@ func (s *Server) homeInsights(c *gin.Context) {
 
 	g.Go(func() error {
 		rows, err := s.db.Query(`
-			SELECT COALESCE(superkingdom,'(unknown)') AS label, COUNT(*) AS n
-			FROM metadata WHERE genome_size >= 1000
+			SELECT COALESCE(superkingdom,'(unknown)') AS label, COUNT(*) AS n,
+			       COUNT(DISTINCT species_taxid) AS taxids
+			FROM metadata WHERE genome_size_manual >= 1000
 			GROUP BY 1 ORDER BY n DESC`)
 		if err != nil {
 			return err
@@ -274,11 +466,12 @@ func (s *Server) homeInsights(c *gin.Context) {
 		defer rows.Close()
 		for rows.Next() {
 			var kv KV
-			var n sql.NullInt64
-			if err := rows.Scan(&kv.Label, &n); err != nil {
+			var n, t sql.NullInt64
+			if err := rows.Scan(&kv.Label, &n, &t); err != nil {
 				return err
 			}
 			kv.N = float64(n.Int64)
+			kv.Taxids = t.Int64
 			skRows = append(skRows, kv)
 		}
 		return rows.Err()
@@ -309,10 +502,7 @@ func (s *Server) homeInsights(c *gin.Context) {
 	})
 
 	g.Go(func() error {
-		rows, err := s.db.Query(`
-			SELECT FLOOR(score/10)*10 AS bin, COUNT(*) AS n
-			FROM (SELECT "Z-DNA Score" AS score FROM data USING SAMPLE 200000 ROWS) s
-			GROUP BY 1 ORDER BY 1`)
+		rows, err := s.db.Query(homeScoreHistogramQuery)
 		if err != nil {
 			return err
 		}
@@ -331,36 +521,8 @@ func (s *Server) homeInsights(c *gin.Context) {
 		return rows.Err()
 	})
 
-	g.Go(func() error {
-		rows, err := s.db.Query(`
-			SELECT TRY_CAST(genome_size AS DOUBLE) AS gs,
-			       TRY_CAST(gc_percent  AS DOUBLE) AS gc,
-			       COALESCE(superkingdom,'(unknown)') AS sk
-			FROM metadata
-			WHERE genome_size IS NOT NULL AND gc_percent IS NOT NULL
-			  AND genome_size >= 1000
-			USING SAMPLE 5000 ROWS`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var p ScatterPt
-			var gs, gc sql.NullFloat64
-			if err := rows.Scan(&gs, &gc, &p.SK); err != nil {
-				return err
-			}
-			p.GS = gs.Float64
-			p.GC = gc.Float64
-			scRows = append(scRows, p)
-		}
-		return rows.Err()
-	})
-
 	if err := g.Wait(); err != nil {
-		log.Println("homeInsights error:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+		return nil, err
 	}
 
 	// Ensure non-null JSON arrays.
@@ -373,30 +535,13 @@ func (s *Server) homeInsights(c *gin.Context) {
 	if histRows == nil {
 		histRows = []HistBin{}
 	}
-	if scRows == nil {
-		scRows = []ScatterPt{}
-	}
 
-	resp := InsightsResponse{
+	return json.Marshal(InsightsResponse{
 		KPIs:          kpis,
 		Superkingdoms: skRows,
 		TopKingdoms:   topRows,
 		Histogram:     histRows,
-		Scatter:       scRows,
-	}
-	payload, err := json.Marshal(resp)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	insightsCached.mu.Lock()
-	insightsCached.payload = payload
-	insightsCached.expiry = time.Now().Add(15 * time.Minute)
-	insightsCached.mu.Unlock()
-
-	c.Header("X-Cache", "MISS")
-	serveJSON(c, payload)
+	})
 }
 
 func rowsToMaps(rows *sql.Rows) ([]map[string]any, error) {
@@ -502,7 +647,18 @@ func frontendHandler(staticDir string) gin.HandlerFunc {
 		c.File(indexPath)
 	}
 }
+
+// adminInit is disabled (404) unless ADMIN_TOKEN is set; callers must then send the
+// same value in the X-Admin-Token header.
 func (s *Server) adminInit(c *gin.Context) {
+	if s.cfg.AdminToken == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "admin endpoint disabled (set ADMIN_TOKEN to enable)"})
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(c.GetHeader("X-Admin-Token")), []byte(s.cfg.AdminToken)) != 1 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "invalid admin token"})
+		return
+	}
 	if err := s.createOrReplaceViews(); err != nil {
 		log.Println("adminInit error:", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -512,13 +668,6 @@ func (s *Server) adminInit(c *gin.Context) {
 }
 
 // ---------- METADATA ----------
-/* ... ίδιος κώδικας με πριν για:
-   - metadataList
-   - metadataExport
-   - metadataTopClasses
-   - metadataDistinct
-(παραμένουν ακριβώς όπως στην προηγούμενη έκδοση που ήδη τρέχεις) */
-/* ------------- αρχή αντιγραφής από την έκδοση που τρέχεις ------------- */
 func (s *Server) metadataList(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "25"))
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
@@ -535,7 +684,6 @@ func (s *Server) metadataList(c *gin.Context) {
 	// Build SELECT with proper aliases
 	selectList := buildMetadataSelect()
 
-	//sortCol := cols[0]
 	sortCol := "tax_name"
 	if reqSort != "" {
 		for _, cName := range cols {
@@ -545,70 +693,33 @@ func (s *Server) metadataList(c *gin.Context) {
 			}
 		}
 	}
-	// orderBy := fmt.Sprintf(" ORDER BY %s %s", quoteIdent(sortCol), dir)
 	orderBy := ""
 	if sortCol == "tax_name" {
 		orderBy = fmt.Sprintf(" ORDER BY LOWER(REPLACE(REPLACE(REPLACE(%s, '''', ''), '[', ''), ']', '')) %s", quoteIdent(sortCol), dir)
 	} else {
 		orderBy = fmt.Sprintf(" ORDER BY %s %s", quoteIdent(sortCol), dir)
 	}
+	// Accession as tie-breaker: rows with the same sort value (e.g. several assemblies
+	// of one species) keep a fixed order, so paging never repeats or skips rows.
+	orderBy += ", assembly"
 
-	// Always enforce genome_size >= 1000
+	// Always enforce genome_size_manual >= 1000
 	whereParts := []string{metadataBaseFilter}
 	args := []any{}
 
 	if q := strings.TrimSpace(c.Query("q")); q != "" {
-		ors := make([]string, 0, len(cols))
-		for _, col := range cols {
-			ors = append(ors, fmt.Sprintf("LOWER(CAST(%s AS VARCHAR)) LIKE '%%' || LOWER(?) || '%%'", quoteIdent(col)))
+		// cols holds display labels; search the underlying table columns.
+		ors := make([]string, 0, len(metadataColumns))
+		for _, col := range metadataColumns {
+			ors = append(ors, fmt.Sprintf("LOWER(CAST(%s AS VARCHAR)) LIKE '%%' || LOWER(?) || '%%'", quoteIdent(col.DbName)))
 			args = append(args, q)
 		}
 		whereParts = append(whereParts, "("+strings.Join(ors, " OR ")+")")
 	}
-	ciEq := func(col string) string { return fmt.Sprintf("LOWER(%s) = LOWER(?)", quoteIdent(col)) }
-	maybeAddTax := func(name string) {
-		val := strings.TrimSpace(c.Query(name))
-		if val == "" {
-			return
-		}
-		whereParts = append(whereParts, ciEq(name))
-		args = append(args, val)
-	}
-	for _, t := range []string{"superkingdom", "kingdom", "phylum", "class", "order", "family", "genus", "tax_name"} {
-		if strings.TrimSpace(c.Query(t)) != "" {
-			maybeAddTax(t)
-		}
-	}
-	if v := strings.TrimSpace(c.Query("assembly_eq")); v != "" {
-		whereParts = append(whereParts, ciEq("assembly"))
-		args = append(args, v)
-	}
-	if v := strings.TrimSpace(c.Query("taxid_eq")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			whereParts = append(whereParts, "taxid = ?")
-			args = append(args, n)
-		}
-	}
+	fw, fa := metadataFilters(c)
+	whereParts = append(whereParts, fw...)
+	args = append(args, fa...)
 
-	type rng struct{ col, min, max string }
-	for _, r := range []rng{
-		{"genome_size", "genome_size_min", "genome_size_max"},
-		{"genome_size_ungapped", "genome_size_ungapped_min", "genome_size_ungapped_max"},
-		{"gc_percent", "gc_percent_min", "gc_percent_max"},
-	} {
-		if v := strings.TrimSpace(c.Query(r.min)); v != "" {
-			if n, err := strconv.ParseFloat(v, 64); err == nil {
-				whereParts = append(whereParts, fmt.Sprintf("%s >= ?", quoteIdent(r.col)))
-				args = append(args, n)
-			}
-		}
-		if v := strings.TrimSpace(c.Query(r.max)); v != "" {
-			if n, err := strconv.ParseFloat(v, 64); err == nil {
-				whereParts = append(whereParts, fmt.Sprintf("%s <= ?", quoteIdent(r.col)))
-				args = append(args, n)
-			}
-		}
-	}
 	where := ""
 	if len(whereParts) > 0 {
 		where = " WHERE " + strings.Join(whereParts, " AND ")
@@ -647,6 +758,142 @@ func (s *Server) metadataList(c *gin.Context) {
 		"offset":  offset,
 		"total":   total,
 	})
+}
+
+// metadataFilters turns the Species browser filter parameters (taxonomy, exact
+// assembly/taxid, ranges) into WHERE clauses with their arguments.
+func metadataFilters(c *gin.Context) ([]string, []any) {
+	whereParts := []string{}
+	args := []any{}
+	ciEq := func(col string) string { return fmt.Sprintf("LOWER(%s) = LOWER(?)", quoteIdent(col)) }
+	maybeAddTax := func(name string) {
+		val := strings.TrimSpace(c.Query(name))
+		if val == "" {
+			return
+		}
+		whereParts = append(whereParts, ciEq(name))
+		args = append(args, val)
+	}
+	for _, t := range []string{"superkingdom", "kingdom", "phylum", "class", "order", "family", "genus", "tax_name"} {
+		if strings.TrimSpace(c.Query(t)) != "" {
+			maybeAddTax(t)
+		}
+	}
+	if v := strings.TrimSpace(c.Query("assembly_eq")); v != "" {
+		whereParts = append(whereParts, ciEq("assembly"))
+		args = append(args, v)
+	}
+	if v := strings.TrimSpace(c.Query("taxid_eq")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			whereParts = append(whereParts, "taxid = ?")
+			args = append(args, n)
+		}
+	}
+
+	type rng struct{ col, min, max string }
+	for _, r := range []rng{
+		{"genome_size_manual", "genome_size_min", "genome_size_max"},
+		{"genome_size_ungapped", "genome_size_ungapped_min", "genome_size_ungapped_max"},
+		{"gc_percent", "gc_percent_min", "gc_percent_max"},
+	} {
+		if v := strings.TrimSpace(c.Query(r.min)); v != "" {
+			if n, err := strconv.ParseFloat(v, 64); err == nil {
+				whereParts = append(whereParts, fmt.Sprintf("%s >= ?", quoteIdent(r.col)))
+				args = append(args, n)
+			}
+		}
+		if v := strings.TrimSpace(c.Query(r.max)); v != "" {
+			if n, err := strconv.ParseFloat(v, 64); err == nil {
+				whereParts = append(whereParts, fmt.Sprintf("%s <= ?", quoteIdent(r.col)))
+				args = append(args, n)
+			}
+		}
+	}
+	return whereParts, args
+}
+
+// metadataCharts serves the Species browser charts over every assembly matching
+// the filters, balanced by species taxid like the homepage: values are averaged
+// per species taxid first. Genera: top and lowest by mean density (unclassified
+// excluded); points: one per species taxid (GC, density, genome size).
+func (s *Server) metadataCharts(c *gin.Context) {
+	whereParts, args := metadataFilters(c)
+	where := " WHERE " + strings.Join(append([]string{metadataBaseFilter}, whereParts...), " AND ")
+
+	edge, _ := strconv.Atoi(c.DefaultQuery("genus_edge", "4"))
+	if edge < 1 || edge > 50 {
+		edge = 4
+	}
+
+	genusSQL := `
+		SELECT genus, density, assemblies, taxids, total FROM (
+			SELECT genus, AVG(d) AS density, SUM(n) AS assemblies, COUNT(*) AS taxids,
+			       COUNT(*) OVER () AS total,
+			       ROW_NUMBER() OVER (ORDER BY AVG(d) DESC, genus) AS rank_top,
+			       ROW_NUMBER() OVER (ORDER BY AVG(d) ASC, genus DESC) AS rank_low
+			FROM (
+				SELECT genus, species_taxid, AVG(obs_density_per_kb) AS d, COUNT(*) AS n
+				FROM metadata` + where + `
+				  AND genus IS NOT NULL AND genus <> '' AND genus NOT ILIKE '%unclassified%'
+				  AND species_taxid IS NOT NULL AND obs_density_per_kb IS NOT NULL
+				GROUP BY genus, species_taxid
+			) t
+			GROUP BY genus
+		) g
+		WHERE total <= ? OR rank_top <= ? OR rank_low <= ?
+		ORDER BY density DESC, genus`
+	genusArgs := append(append([]any{}, args...), 2*edge, edge, edge)
+	rows, err := s.db.Query(genusSQL, genusArgs...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	genera := []gin.H{}
+	var generaTotal int64
+	for rows.Next() {
+		var genus string
+		var density float64
+		var assemblies, taxids int64
+		if err := rows.Scan(&genus, &density, &assemblies, &taxids, &generaTotal); err != nil {
+			rows.Close()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		genera = append(genera, gin.H{"genus": genus, "density": density, "assemblies": assemblies, "taxids": taxids})
+	}
+	rows.Close()
+
+	pointSQL := `
+		SELECT COALESCE(MAX(superkingdom), '(NA)'), COALESCE(MAX(tax_name), ''), COUNT(*),
+		       ROUND(AVG(gc_percent), 2), ROUND(AVG(obs_density_per_kb), 3), ROUND(AVG(genome_size_manual))
+		FROM metadata` + where + ` AND species_taxid IS NOT NULL
+		GROUP BY species_taxid
+		ORDER BY species_taxid`
+	rows, err = s.db.Query(pointSQL, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	// Compact rows: [superkingdom, species, assemblies, gc, density, genome size].
+	points := [][]any{}
+	for rows.Next() {
+		var sk, name string
+		var n int64
+		var gc, den, gsize sql.NullFloat64
+		if err := rows.Scan(&sk, &name, &n, &gc, &den, &gsize); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		val := func(v sql.NullFloat64) any {
+			if !v.Valid {
+				return nil
+			}
+			return v.Float64
+		}
+		points = append(points, []any{sk, name, n, val(gc), val(den), val(gsize)})
+	}
+	c.JSON(http.StatusOK, gin.H{"genera": genera, "genera_total": generaTotal, "points": points})
 }
 
 func (s *Server) metadataExport(c *gin.Context) {
@@ -691,6 +938,10 @@ func (s *Server) metadataExport(c *gin.Context) {
 		}
 		whereParts = append(whereParts, "("+strings.Join(ors, " OR ")+")")
 	}
+	// Same taxonomy / exact / range filters as the Species browser table.
+	fw, fa := metadataFilters(c)
+	whereParts = append(whereParts, fw...)
+	args = append(args, fa...)
 
 	where := ""
 	if len(whereParts) > 0 {
@@ -719,33 +970,140 @@ func (s *Server) metadataExport(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	c.Header("Content-Type", "text/csv")
-	c.Header("Content-Disposition", "attachment; filename=metadata_export.csv")
+	writeMetadataExport(c, rows, strings.ToLower(strings.TrimSpace(c.DefaultQuery("fmt", "csv"))))
+}
 
-	w := csv.NewWriter(c.Writer)
-	_ = w.Write(getMetadataColumns())
+// writeMetadataExport streams the exported rows as csv, tsv, json, xml or
+// xlsx (an HTML table that Excel opens, saved as .xls). NULLs become empty values.
+func writeMetadataExport(c *gin.Context, rows *sql.Rows, format string) {
+	header := getMetadataColumns()
+	ext, contentType := "csv", "text/csv"
+	switch format {
+	case "tsv":
+		ext, contentType = "tsv", "text/tab-separated-values"
+	case "json":
+		ext, contentType = "json", "application/json"
+	case "xml":
+		ext, contentType = "xml", "application/xml"
+	case "xlsx", "xls":
+		ext, contentType = "xls", "application/vnd.ms-excel"
+	default:
+		format = "csv"
+	}
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", "attachment; filename=metadata_export."+ext)
+
 	// Sized by the SELECT list, not the table: metadata has more columns than are exported.
 	vals := make([]any, len(metadataColumns))
 	ptrs := make([]any, len(vals))
 	for i := range vals {
 		ptrs[i] = &vals[i]
 	}
-	for rows.Next() {
+	next := func() ([]string, []any, bool) {
+		if !rows.Next() {
+			return nil, nil, false
+		}
 		if err := rows.Scan(ptrs...); err != nil {
 			log.Println("metadataExport scan error:", err)
-			break
+			return nil, nil, false
 		}
 		rec := make([]string, len(vals))
+		raw := make([]any, len(vals))
 		for i, v := range vals {
-			if b, ok := v.([]byte); ok {
-				rec[i] = string(b)
-			} else {
-				rec[i] = fmt.Sprint(v)
+			switch t := v.(type) {
+			case nil:
+				rec[i] = ""
+			case []byte:
+				rec[i] = string(t)
+				v = string(t)
+			default:
+				rec[i] = fmt.Sprint(t)
 			}
+			raw[i] = v
 		}
-		_ = w.Write(rec)
+		return rec, raw, true
 	}
-	w.Flush()
+
+	w := c.Writer
+	switch format {
+	case "json":
+		_, _ = w.WriteString("[")
+		for first := true; ; first = false {
+			_, raw, ok := next()
+			if !ok {
+				break
+			}
+			if !first {
+				_, _ = w.WriteString(",")
+			}
+			_, _ = w.WriteString("{")
+			for i, h := range header {
+				k, _ := json.Marshal(h)
+				v, err := json.Marshal(raw[i])
+				if err != nil {
+					v = []byte("null")
+				}
+				if i > 0 {
+					_, _ = w.WriteString(",")
+				}
+				_, _ = w.Write(k)
+				_, _ = w.WriteString(":")
+				_, _ = w.Write(v)
+			}
+			_, _ = w.WriteString("}")
+		}
+		_, _ = w.WriteString("]")
+	case "xml":
+		_, _ = w.WriteString(xml.Header + "<rows>\n")
+		for {
+			rec, _, ok := next()
+			if !ok {
+				break
+			}
+			_, _ = w.WriteString("  <row>")
+			for i, h := range header {
+				_, _ = w.WriteString(`<field name="`)
+				_ = xml.EscapeText(w, []byte(h))
+				_, _ = w.WriteString(`">`)
+				_ = xml.EscapeText(w, []byte(rec[i]))
+				_, _ = w.WriteString("</field>")
+			}
+			_, _ = w.WriteString("</row>\n")
+		}
+		_, _ = w.WriteString("</rows>\n")
+	case "xlsx", "xls":
+		_, _ = w.WriteString(`<html><head><meta charset="utf-8"></head><body><table><tr>`)
+		for _, h := range header {
+			_, _ = w.WriteString("<th>" + html.EscapeString(h) + "</th>")
+		}
+		_, _ = w.WriteString("</tr>\n")
+		for {
+			rec, _, ok := next()
+			if !ok {
+				break
+			}
+			_, _ = w.WriteString("<tr>")
+			for _, v := range rec {
+				_, _ = w.WriteString("<td>" + html.EscapeString(v) + "</td>")
+			}
+			_, _ = w.WriteString("</tr>\n")
+		}
+		_, _ = w.WriteString("</table></body></html>")
+	default:
+		cw := csv.NewWriter(w)
+		if format == "tsv" {
+			cw.Comma = '\t'
+		}
+		_ = cw.Write(header)
+		for {
+			rec, _, ok := next()
+			if !ok {
+				break
+			}
+			_ = cw.Write(rec)
+		}
+		cw.Flush()
+	}
 }
 
 func (s *Server) metadataTopClasses(c *gin.Context) {
@@ -755,7 +1113,6 @@ func (s *Server) metadataTopClasses(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"rows": []any{}, "data": []any{}, "labels": []string{}, "values": []int64{}, "datasets": []gin.H{{"label": "count", "data": []int64{}}}})
 		return
 	}
-	// επιλέγουμε διαθέσιμη κατηγορική στήλη με προτεραιότητα
 	col := ""
 	for _, cand := range []string{"class", "kingdom", "phylum", "superkingdom"} {
 		for _, cName := range cols {
@@ -873,9 +1230,19 @@ func (s *Server) metadataDistinct(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"values": out})
 }
 
-/* ------------- τέλος αντιγραφής ------------- */
-
 // ---------- Z‑DNA ----------
+// zdnaAssemblyScope returns the assembly accession that the raw Z-DNA endpoints
+// (search, export, score histogram) require: without one a request would scan all
+// ~2.5 billion predictions. It answers 400 itself when the parameter is missing.
+func zdnaAssemblyScope(c *gin.Context) (string, bool) {
+	v := strings.TrimSpace(c.Query("assembly_eq"))
+	if v == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "assembly_eq (an assembly accession) is required"})
+		return "", false
+	}
+	return v, true
+}
+
 func (s *Server) zdnaSearch(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "25"))
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
@@ -892,14 +1259,14 @@ func (s *Server) zdnaSearch(c *gin.Context) {
 		}
 	}
 
-	whereParts := []string{}
-	args := []any{}
+	assembly, ok := zdnaAssemblyScope(c)
+	if !ok {
+		return
+	}
+	whereParts := []string{`"assembly" = ?`}
+	args := []any{assembly}
 	if v := strings.TrimSpace(c.Query("chr")); v != "" {
 		whereParts = append(whereParts, `"Chromosome" = ?`)
-		args = append(args, v)
-	}
-	if v := strings.TrimSpace(c.Query("assembly_eq")); v != "" {
-		whereParts = append(whereParts, `"Assembly" = ?`)
 		args = append(args, v)
 	}
 	if v := c.Query("start_gte"); v != "" {
@@ -938,7 +1305,7 @@ func (s *Server) zdnaSearch(c *gin.Context) {
 	fast := strings.TrimSpace(c.DefaultQuery("fast", "1")) == "1"
 	var total int64 = -1
 	if !fast {
-		if err := s.db.QueryRow("SELECT COUNT(*) FROM data"+where, args...).Scan(&total); err != nil {
+		if err := s.db.QueryRowContext(c.Request.Context(), "SELECT COUNT(*) FROM data"+where, args...).Scan(&total); err != nil {
 			log.Println("zdnaSearch count error:", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -952,7 +1319,7 @@ func (s *Server) zdnaSearch(c *gin.Context) {
 	q := "SELECT " + selectList + " FROM data" + where + orderBy + " LIMIT ? OFFSET ?"
 	args2 := append([]any{}, args...)
 	args2 = append(args2, limit, offset)
-	rows, err := s.db.Query(q, args2...)
+	rows, err := s.db.QueryContext(c.Request.Context(), q, args2...)
 	if err != nil {
 		log.Println("zdnaSearch data query error:", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -996,8 +1363,12 @@ func (s *Server) zdnaExport(c *gin.Context) {
 		}
 	}
 
-	whereParts := []string{}
-	args := []any{}
+	assembly, ok := zdnaAssemblyScope(c)
+	if !ok {
+		return
+	}
+	whereParts := []string{`"assembly" = ?`}
+	args := []any{assembly}
 	if v := strings.TrimSpace(c.Query("chr")); v != "" {
 		whereParts = append(whereParts, `"Chromosome" = ?`)
 		args = append(args, v)
@@ -1043,7 +1414,7 @@ func (s *Server) zdnaExport(c *gin.Context) {
 	if lim > 0 {
 		q += fmt.Sprintf(" LIMIT %d OFFSET %d", lim, off)
 	}
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.db.QueryContext(c.Request.Context(), q, args...)
 	if err != nil {
 		log.Println("zdnaExport query error:", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1079,7 +1450,6 @@ func (s *Server) zdnaExport(c *gin.Context) {
 	w.Flush()
 }
 
-// ΝΕΟ: autocomplete για Chromosome
 func (s *Server) zdnaDistinctChr(c *gin.Context) {
 	prefix := strings.TrimSpace(c.DefaultQuery("prefix", ""))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
@@ -1093,9 +1463,9 @@ func (s *Server) zdnaDistinctChr(c *gin.Context) {
 		q += ` WHERE LOWER("Chromosome") LIKE LOWER(?)`
 		args = append(args, prefix+"%")
 	}
-	//q += ` ORDER BY v LIMIT ?`
-	//args = append(args, limit)
 
+	q += ` LIMIT ?`
+	args = append(args, limit)
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1125,8 +1495,12 @@ func (s *Server) zdnaScoreHistogram(c *gin.Context) {
 		sampleRows = 0
 	}
 
-	whereParts := []string{}
-	args := []any{}
+	assembly, ok := zdnaAssemblyScope(c)
+	if !ok {
+		return
+	}
+	whereParts := []string{`"assembly" = ?`}
+	args := []any{assembly}
 	if v := strings.TrimSpace(c.Query("chr")); v != "" {
 		whereParts = append(whereParts, `"Chromosome" = ?`)
 		args = append(args, v)
@@ -1164,10 +1538,10 @@ ORDER BY 1
 `, bin, src)
 	}
 	q := buildSQL(approx)
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.db.QueryContext(c.Request.Context(), q, args...)
 	if err != nil && approx {
 		q = buildSQL(false)
-		rows, err = s.db.Query(q, args...)
+		rows, err = s.db.QueryContext(c.Request.Context(), q, args...)
 	}
 	if err != nil {
 		log.Println("zdnaScoreHistogram query error:", err, "sql:", q)
@@ -1218,17 +1592,38 @@ func (s *Server) sqlPost(c *gin.Context) {
 	}
 	runSQL(s, c, strings.TrimSpace(p.SQL))
 }
+
+// validateSingleSelect accepts exactly one SELECT statement. It uses DuckDB's own parser:
+// json_serialize_sql only serializes SELECT statements and returns one entry per
+// statement, so "SELECT 1; DROP TABLE x" and any non-SELECT statement are rejected.
+func validateSingleSelect(db *sql.DB, stmt string) error {
+	if !strings.HasPrefix(strings.ToUpper(stmt), "SELECT ") {
+		return errors.New("only SELECT statements are allowed")
+	}
+	var failed bool
+	var n sql.NullInt64
+	err := db.QueryRow(`
+		SELECT COALESCE(json_extract(j, '$.error')::BOOLEAN, true), json_array_length(j, '$.statements')
+		FROM (SELECT json_serialize_sql(?::VARCHAR) AS j)`, stmt).Scan(&failed, &n)
+	if err != nil {
+		return err
+	}
+	if failed || !n.Valid || n.Int64 != 1 {
+		return errors.New("only a single SELECT statement is allowed")
+	}
+	return nil
+}
+
 func runSQL(s *Server, c *gin.Context, stmt string) {
 	if stmt == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "empty sql"})
 		return
 	}
-	up := strings.ToUpper(stmt)
-	if !(strings.HasPrefix(up, "SELECT ") || strings.HasPrefix(up, "EXPLAIN ") || strings.HasPrefix(up, "DESCRIBE ")) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "only SELECT/EXPLAIN/DESCRIBE are allowed"})
+	if err := validateSingleSelect(s.db, stmt); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	rows, err := s.db.Query(stmt)
+	rows, err := s.db.QueryContext(c.Request.Context(), stmt)
 	if err != nil {
 		log.Println("sql error:", err, "sql:", stmt)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1244,7 +1639,7 @@ func runSQL(s *Server, c *gin.Context, stmt string) {
 }
 
 // Global base filter for all metadata queries
-const metadataBaseFilter = "genome_size >= 1000"
+const metadataBaseFilter = "genome_size_manual >= 1000"
 
 // Metadata column configuration
 type metadataColumn struct {
@@ -1254,12 +1649,12 @@ type metadataColumn struct {
 }
 
 // Column definitions in display order. Labels must match METADATA_COLUMNS in
-// frontend/src/components/DataTable.tsx, which resolves response columns by label.
+// frontend/src/utils/metadataColumns.ts, which resolves response columns by label.
 var metadataColumns = []metadataColumn{
 	{DbName: "assembly", Label: "Assembly", Hidden: false},
 	{DbName: "taxid", Label: "Taxon ID", Hidden: false},
 	{DbName: "assembly_level", Label: "Assembly level", Hidden: true},
-	{DbName: "genome_size", Label: "Genome size", Hidden: false},
+	{DbName: "genome_size_manual", Label: "Genome size", Hidden: false},
 	{DbName: "gc_percent", Label: "%GC", Hidden: false},
 	{DbName: "superkingdom", Label: "Superkingdom", Hidden: false},
 	{DbName: "kingdom", Label: "Kingdom", Hidden: false},
@@ -1269,7 +1664,6 @@ var metadataColumns = []metadataColumn{
 	{DbName: "family", Label: "Family", Hidden: false},
 	{DbName: "genus", Label: "Genus", Hidden: false},
 	{DbName: "tax_name", Label: "Species", Hidden: false},
-	{DbName: "is_t2t", Label: "Is T2T", Hidden: false},
 	{DbName: "viral_realm", Label: "Viral realm", Hidden: false},
 	{DbName: "updated_tax_name", Label: "Full organism name", Hidden: false},
 	{DbName: "infraspecific_name", Label: "Infraspecific name", Hidden: true},
@@ -1279,10 +1673,9 @@ var metadataColumns = []metadataColumn{
 	{DbName: "scaffold_count", Label: "Scaffolds", Hidden: true},
 	{DbName: "contig_count", Label: "Contigs", Hidden: true},
 	{DbName: "reference_genome", Label: "Reference genome", Hidden: true},
-	{DbName: "has_gff", Label: "Has GFF", Hidden: true},
-	{DbName: "obs_zbp", Label: "Z-DNA/-RNA bases count", Hidden: false},
-	{DbName: "obs_density_per_kb", Label: "Z-DNA/-RNA density per kb", Hidden: false},
-	{DbName: "obs_n_zdna", Label: "Z-DNA/-RNA predictions count", Hidden: false},
+	{DbName: "obs_zbp", Label: "Z-DNA bases count", Hidden: false},
+	{DbName: "obs_density_per_kb", Label: "Z-DNA density per kb", Hidden: false},
+	{DbName: "obs_n_zdna", Label: "Z-DNA predictions count", Hidden: false},
 }
 
 // Helper to build SELECT clause with proper column aliases
@@ -1370,7 +1763,8 @@ func main() {
 
 	s := &Server{cfg: cfg, db: db, dbErr: dbErr}
 	if s.db != nil {
-		_ = s.createOrReplaceViews() // «ήπιο» init
+		_ = s.createOrReplaceViews()
+		go s.loadInsights() // warm the homepage insights in the background
 	}
 
 	r := gin.New()
@@ -1387,11 +1781,12 @@ func main() {
 	r.GET("/api/metadata/list", s.metadataList)
 	r.GET("/api/metadata/classes/top", s.metadataTopClasses)
 	r.GET("/api/metadata/export", s.metadataExport)
+	r.GET("/api/metadata/charts", s.metadataCharts)
 
 	// zdna
 	r.GET("/api/zdna/search", s.zdnaSearch)
 	r.GET("/api/zdna/export", s.zdnaExport)
-	r.GET("/api/zdna/distinct_chr", s.zdnaDistinctChr) // ΝΕΟ
+	r.GET("/api/zdna/distinct_chr", s.zdnaDistinctChr)
 	r.GET("/api/zdna/score_histogram", s.zdnaScoreHistogram)
 
 	// home insights (fast-path: parallel queries + 15-min server cache + gzip + browser cache)

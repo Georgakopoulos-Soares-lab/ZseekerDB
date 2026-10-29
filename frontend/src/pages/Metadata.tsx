@@ -1,5 +1,5 @@
 // frontend/src/pages/MetadataPage.tsx
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import * as echarts from 'echarts';
 import {
@@ -34,10 +34,14 @@ import { Link as RouterLink } from 'react-router-dom';
 import RangeFilter from '../components/RangeFilter';
 import { ColumnVisibilityMenu } from '../components/ColumnVisibilityMenu';
 import BasicTaxonomy from '../components/BasicTaxonomy';
-import { METADATA_COLUMNS } from '../components/DataTable';
+import { METADATA_COLUMNS } from '../utils/metadataColumns';
 import { useTheme } from '@mui/material/styles';
-import { taxidBalancedGroupMeans } from '../utils/taxidAverages';
-import { VIZ_FONT } from '../utils/visualizationTypography';
+import { SK_COLORS, SK_FALLBACK_COLOR } from '../utils/superkingdomColors';
+import { VIZ_FONT, VIZ_MUI_FONT } from '../utils/visualizationTypography';
+import type { ChartParam } from '../utils/chartTypes';
+import { shortenTaxonLabel } from '../utils/shortenLabel';
+import { DENSITY_TICKS, tickPosition } from '../utils/tickScale';
+import { gcHistogram, genomeSizeHistogram } from '../utils/histogramBins';
 
 // ---------------- helpers ----------------
 
@@ -58,22 +62,6 @@ type Ranges = {
   gc_percent_max: number | '';
 };
 
-// Build a simple histogram (equal bins)
-function buildHistogram(values: number[], binCount = 20) {
-  const v = values.filter((x) => Number.isFinite(x));
-  if (v.length === 0) return { labels: [] as string[], counts: [] as number[] };
-  const min = Math.min(...v), max = Math.max(...v);
-  const width = (max - min) > 0 ? (max - min) / binCount : 1;
-  const bins = Array.from({ length: binCount }, (_, i) => min + i * width);
-  const counts = new Array(binCount).fill(0);
-  for (const x of v) {
-    const idx = Math.min(binCount - 1, Math.max(0, Math.floor((x - min) / width)));
-    counts[idx]++;
-  }
-  const labels = bins.map((b) => `${Math.round(b)}–${Math.round(b + width)}`);
-  return { labels, counts };
-}
-
 // Bubble size helper (sqrt scale) for scatter
 function makeBubbleSizer(sizes: number[]) {
   const vals = sizes.filter((x) => Number.isFinite(x) && x > 0);
@@ -88,27 +76,21 @@ function makeBubbleSizer(sizes: number[]) {
   };
 }
 
-// Βασική παλέτα superkingdoms (ίδια με την αρχική σελίδα)
-const SUPERKINGDOM_COLORS = ['#4D77A9', '#F08F2A', '#E25558', '#77B7B3'] as const;
+// Single-colour chart fills (bars/histograms); superkingdom colours come from SK_COLORS.
+const CHART_COLORS = ['#4D77A9', '#F08F2A', '#E25558', '#77B7B3'] as const;
 
 const SUPERKINGDOM_COLOR_MAP: Record<string, string> = {
-  Archaea: SUPERKINGDOM_COLORS[0],
-  Bacteria: SUPERKINGDOM_COLORS[1],
-  Eukaryota: SUPERKINGDOM_COLORS[2],
-  Viruses: SUPERKINGDOM_COLORS[3],
-  '(NA)': '#9E9E9E', // fallback για missing
+  ...SK_COLORS,
+  '(NA)': '#9E9E9E',
 };
 
 /* CHART COLORS----------- palettes (distinct per chart) ---------------- */
 /* CHART COLORS----------- palettes (distinct per chart) ---------------- */
 const CHART_PALETTES = {
-  // εδώ κυρίως χρησιμοποιούμε το πρώτο χρώμα για το bar
-  genusBar: [SUPERKINGDOM_COLORS[0]],
-  // scatter: ίδια παλέτα ανά superkingdom
-  scatter: SUPERKINGDOM_COLORS,
-  // επιλέγουμε 1–1 superkingdom colors για τα hist
-  histGenome: [SUPERKINGDOM_COLORS[3]],
-  histGC: [SUPERKINGDOM_COLORS[2]],
+  genusBar: [CHART_COLORS[0]],
+  scatter: [SK_FALLBACK_COLOR],
+  histGenome: [CHART_COLORS[3]],
+  histGC: [CHART_COLORS[2]],
 } as const;
 
 
@@ -125,7 +107,7 @@ const COL_ALIASES: Record<string, string[]> = {
   obs_density_per_kb: ['zdna_density', 'Z-DNA density (per kb)'],
   // others that charts use
   gc_percent: ['GC content (%)'],
-  genome_size: ['Genome size'],
+  genome_size_manual: ['Genome size'],
   genus: ['Genus'],
   superkingdom: ['Superkingdom'],
   tax_name: ['Specie', 'Species'],
@@ -182,9 +164,8 @@ function estimateBottomPadding(
   return Math.min(max, Math.round(min + longest * perChar));
 }
 
-// Βασικό ύψος για charts + helper που αυξάνει το ύψος όταν μεγαλώνει το bottom
-const BASE_CHART_HEIGHT = 320;     // «κανονικό» ύψος plot area
-const DEFAULT_GRID_BOTTOM = 90;    // η default τιμή για grid.bottom στα bar/hist
+const BASE_CHART_HEIGHT = 320;
+const DEFAULT_GRID_BOTTOM = 90;
 const MIN_CHART_HEIGHT = 380;
 const MAX_CHART_HEIGHT = 650;
 
@@ -196,8 +177,15 @@ function chartHeightFromBottom(bottom: number) {
 
 // ---------------- page ----------------
 
-const VIZ_LIMIT = 5000;      // δείγμα για charts
-const TOP_N_GENUS = 15;      // πόσα genus να δείχνει το bar
+const BAR_OUTLINE = { borderColor: '#000000', borderWidth: 1 };
+
+type ChartsData = {
+  genera: { genus: string; density: number; assemblies: number; taxids: number }[];
+  generaTotal: number;
+  points: { sk: string; label: string; n: number; gc: number; den: number; size: number }[];
+};
+const GENUS_EDGE = 4;         // genus bar: top and lowest 4 (all if 8 or fewer), gap bin between
+const X_LABEL_FONT = VIZ_FONT.base + 1;
 
 export default function MetadataPage() {
 
@@ -205,7 +193,6 @@ export default function MetadataPage() {
   const isDarkMode = theme.palette.mode === 'dark';
 
   const axisTextColor = isDarkMode ? '#FFFFFF' : theme.palette.text.primary;
-  const axisLineColor = isDarkMode ? '#CCCCCC' : '#444444';
   const gridLineColor = isDarkMode ? '#555555' : '#E0E0E0';
 
   // ------- Tabs -------
@@ -242,7 +229,7 @@ export default function MetadataPage() {
   const [exact, setExact] = useState({ assembly_eq: '', taxid_eq: '' });
 
   // Table + pagination
-  const [rows, setRows] = useState<any[]>([]);
+  const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [cols, setCols] = useState<string[]>([]);
 
   // visibility keyed by LABEL
@@ -262,8 +249,7 @@ export default function MetadataPage() {
   const apply = () => setApplyTick((x) => x + 1);
 
   // Viz data (separate fetch, same filters, big limit)
-  const [vizRows, setVizRows] = useState<any[]>([]);
-  const [vizCols, setVizCols] = useState<string[]>([]);
+  const [charts, setCharts] = useState<ChartsData | null>(null);
   const [vizLoading, setVizLoading] = useState(false);
 
   // Load superkingdom options once
@@ -279,7 +265,6 @@ export default function MetadataPage() {
     setOffset(0);
   }, [superkingdom]);
 
-  // --- formatting μόνο για εμφάνιση: Z-DNA density με 2 δεκαδικά (new+old+label) ---
   const densityColKey = useMemo(
     () => findFirstSmart(cols, ['obs_density_per_kb', 'zdna_density']),
     [cols]
@@ -318,7 +303,6 @@ export default function MetadataPage() {
     [columnDefs, columnsVisible]
   );
 
-  // Εκτίμηση συνολικού πλάτους table με βάση τα ορατά columns
   const estimatedTableWidth = useMemo(
     () => Math.max(visibleColumnDefs.length * 180, 800),
     [visibleColumnDefs.length]
@@ -331,7 +315,6 @@ export default function MetadataPage() {
     return c?.key ?? null;
   }, [columnDefs]);
 
-  // rows με formatted density
   const displayRows = useMemo(() => {
     if (!densityColKey) return rows;
     return rows.map((r) => {
@@ -380,14 +363,18 @@ export default function MetadataPage() {
     p.set('limit', String(limit));
     p.set('offset', String(offset));
     return p.toString();
+    // buildFilterParams reads exactly these filter states; it is a plain function, so
+    // listing it would recompute (and refetch) on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taxEnabled, superkingdom, basicTax, advOpen, rng, exact, limit, offset]);
 
-  // Viz params (big limit, offset 0)
+  // Viz params (same filters, no pagination)
   const paramsViz = useMemo(() => {
     const p = buildFilterParams();
-    p.set('limit', String(VIZ_LIMIT));
-    p.set('offset', '0');
+    p.set('genus_edge', String(GENUS_EDGE));
     return p.toString();
+    // See paramsResults: buildFilterParams depends only on the states listed here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taxEnabled, superkingdom, basicTax, advOpen, rng, exact, applyTick]);
 
   // Fetch data only on APPLY (and on paging/limit changes)
@@ -407,24 +394,33 @@ export default function MetadataPage() {
         setLoading(false);
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [applyTick, paramsResults]);
 
-  // Fetch viz sample (independent from pagination; same filters; big limit)
+  // Fetch chart aggregates over every matching assembly (independent from pagination)
   useEffect(() => {
     if (applyTick === 0) return; // wait until first APPLY
     let cancelled = false;
     (async () => {
       setVizLoading(true);
       try {
-        const r = await fetch(`/api/metadata/list?${paramsViz}`);
+        const r = await fetch(`/api/metadata/charts?${paramsViz}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const j = await r.json();
+        const num = (v: unknown) => (v == null ? NaN : Number(v));
         if (!cancelled) {
-          setVizRows(j.rows ?? []);
-          setVizCols(j.columns ?? []); // may now be labels or dbNames
+          setCharts({
+            genera: (j.genera ?? []).map((g: Record<string, unknown>) => ({
+              genus: String(g.genus), density: num(g.density), assemblies: num(g.assemblies), taxids: num(g.taxids),
+            })),
+            generaTotal: Number(j.genera_total ?? 0),
+            // [superkingdom, species, assemblies, gc, density, genome size]
+            points: (j.points ?? []).map((r: unknown[]) => ({
+              sk: String(r[0] ?? ''), label: String(r[1] ?? ''), n: num(r[2]), gc: num(r[3]), den: num(r[4]), size: num(r[5]),
+            })),
+          });
         }
       } catch {
-        if (!cancelled) { setVizRows([]); setVizCols([]); }
+        if (!cancelled) setCharts(null);
       } finally {
         if (!cancelled) setVizLoading(false);
       }
@@ -435,7 +431,11 @@ export default function MetadataPage() {
   // Export
   const [exportAnchor, setExportAnchor] = useState<null | HTMLElement>(null);
   const exportData = async (fmt: 'csv' | 'tsv' | 'json' | 'xml' | 'xlsx') => {
-    const r = await fetch(`/api/metadata/export?fmt=${fmt}&${paramsResults}`);
+    // Every row matching the applied filters, not just the current page.
+    const p = buildFilterParams();
+    p.set('fmt', fmt);
+    p.set('limit', 'all');
+    const r = await fetch(`/api/metadata/export?${p.toString()}`);
     if (!r.ok) {
       console.error('export failed', r.status);
       setExportAnchor(null);
@@ -445,7 +445,7 @@ export default function MetadataPage() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `metadata_export.${fmt === 'xlsx' ? 'xlsx' : fmt}`;
+    a.download = `metadata_export.${fmt === 'xlsx' ? 'xls' : fmt}`; // Excel opens the HTML table
     a.click();
     URL.revokeObjectURL(url);
     setExportAnchor(null);
@@ -469,7 +469,7 @@ export default function MetadataPage() {
     setOffset(0);
     setLimit(25);
     setRows([]); setCols([]); setTotal(0);
-    setVizRows([]); setVizCols([]);
+    setCharts(null);
     setApplyTick((x) => x + 1);
   };
 
@@ -486,55 +486,39 @@ export default function MetadataPage() {
     setApplyTick((x) => x + 1);
   };
 
-  // ------------- VISUALIZATIONS (derive from vizRows + vizCols) -------------
+  // ------------- VISUALIZATIONS (server-side, all matching assemblies) -------------
+  // /api/metadata/charts balances by species taxid like the homepage: genus means are
+  // means of per-species-taxid means, and the scatter/histograms have one value per
+  // species taxid (the mean of its assemblies).
 
-  const colGenus = useMemo(() => findColSmart(vizCols, 'genus'), [vizCols]);
-  const colGC = useMemo(() => findColSmart(vizCols, 'gc_percent'), [vizCols]);
-  const colGSize = useMemo(() => findColSmart(vizCols, 'genome_size'), [vizCols]);
-  const colSK = useMemo(() => findColSmart(vizCols, 'superkingdom'), [vizCols]);
-  const colTaxid = useMemo(() => findColSmart(vizCols, 'taxid'), [vizCols]);
-  const colTaxName = useMemo(() => findColSmart(vizCols, 'tax_name'), [vizCols]);
-  const colAssembly = useMemo(() => findColSmart(vizCols, 'assembly'), [vizCols]);
-
-  // density column (support new+old db names and label)
-  const vizDensityCol = useMemo(
-    () => findFirstSmart(vizCols, ['obs_density_per_kb', 'zdna_density']),
-    [vizCols]
+  const strongAxisLine = useMemo(
+    () => ({ show: true, lineStyle: { color: isDarkMode ? '#FFFFFF' : '#000000', width: 2 } }),
+    [isDarkMode]
   );
 
-  // 1) Top genera by taxid-balanced mean Z-DNA density (bar)
+  // 1) Genera by taxid-balanced mean Z-DNA density (top and lowest GENUS_EDGE)
   const genusBar = useMemo(() => {
-    if (!vizDensityCol || !colGenus || !colTaxid) {
-      return {
-        cats: [] as string[],
-        values: [] as {
-          value: number;
-          assemblyCount: number;
-          uniqueTaxids: number;
-        }[],
-      };
-    }
-
-    const rowsAgg = taxidBalancedGroupMeans(vizRows, {
-      groupColumn: colGenus,
-      taxidColumn: colTaxid,
-      valueColumn: vizDensityCol,
-    });
-    rowsAgg.sort((a, b) => b.mean - a.mean);
-    const top = rowsAgg.slice(0, TOP_N_GENUS);
+    const ranked = charts?.genera ?? [];
+    const hidden = Math.max(0, (charts?.generaTotal ?? 0) - ranked.length);
+    const shown = hidden > 0
+      ? [...ranked.slice(0, GENUS_EDGE), null, ...ranked.slice(GENUS_EDGE)]
+      : ranked;
     return {
-      cats: top.map(x => x.group),
-      values: top.map(x => ({
-        value: Number(x.mean.toFixed(2)),
-        assemblyCount: x.assemblyCount,
-        uniqueTaxids: x.uniqueTaxids,
-      })),
+      cats: shown.map(x => x?.genus ?? '…'),
+      hidden,
+      values: shown.map(x => (x
+        ? {
+          value: tickPosition(DENSITY_TICKS, x.density),
+          raw: x.density,
+          assemblyCount: x.assemblies,
+          uniqueTaxids: x.taxids,
+        }
+        : { value: null })),
     };
-  }, [vizRows, vizDensityCol, colGenus, colTaxid]);
+  }, [charts]);
 
-  // dynamic bottom + height για το bar των genera
   const genusBottomPad = useMemo(
-    () => estimateBottomPadding(genusBar.cats),
+    () => estimateBottomPadding(genusBar.cats.map(shortenTaxonLabel), { min: 60, perChar: 6, max: 160 }),
     [genusBar]
   );
 
@@ -543,21 +527,37 @@ export default function MetadataPage() {
     [genusBottomPad]
   );
 
+  // Z-DNA density axis: 0, 1, 10, 100, 1,000 /kb at equal distances.
+  const densityAxis = useMemo(() => ({
+    type: 'value',
+    min: 0,
+    max: DENSITY_TICKS.length - 1,
+    interval: 1,
+    name: 'Z-DNA density (/kb)',
+    nameLocation: 'middle',
+    nameGap: 50,
+    axisLabel: {
+      margin: 12,
+      color: axisTextColor,
+      fontSize: VIZ_FONT.base,
+      formatter: (v: number) => (DENSITY_TICKS[Math.round(v)] ?? v).toLocaleString(),
+    },
+    nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
+    axisLine: strongAxisLine,
+    splitLine: { lineStyle: { color: gridLineColor } },
+  }), [axisTextColor, strongAxisLine, gridLineColor]);
+
   const genusBarOption = useMemo(() => ({
     textStyle: { fontSize: VIZ_FONT.base },
-    title: {
-      text: 'Taxid-balanced mean density by genus (/kb)',
-      left: 'center',
-      textStyle: { color: axisTextColor, fontSize: VIZ_FONT.title },
-    },
     tooltip: {
       trigger: 'axis',
-      formatter: (params: any) => {
+      formatter: (params: ChartParam[]) => {
         const point = params[0];
         const data = point?.data ?? {};
+        if (data.raw == null) return `${genusBar.hidden.toLocaleString()} more genera`;
         return [
           point?.name ?? '',
-          `Taxid-balanced mean density: ${Number(point?.value ?? 0).toFixed(2)} /kb`,
+          `Taxid-balanced mean density: ${Number(data.raw).toFixed(2)} /kb`,
           `Assemblies: ${Number(data.assemblyCount ?? 0).toLocaleString()}`,
           `Unique taxids: ${Number(data.uniqueTaxids ?? 0).toLocaleString()}`,
         ].join('<br/>');
@@ -568,52 +568,33 @@ export default function MetadataPage() {
       type: 'category',
       data: genusBar.cats,
       axisLabel: {
+        interval: 0,
         rotate: 35,
         margin: 16,
         color: axisTextColor,
-        fontSize: VIZ_FONT.base,
-        overflow: 'truncate',
-        width: 120,
+        fontSize: X_LABEL_FONT,
+        formatter: (v: string) => shortenTaxonLabel(v),
       },
       name: 'Genus',
       nameLocation: 'middle',
-      nameGap: 130,
+      nameGap: genusBottomPad - 25,
       nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
-      axisLine: { lineStyle: { color: axisLineColor } },
+      axisLine: strongAxisLine,
     },
-    yAxis: {
-      type: 'value',
-      name: 'avg density (/kb)',
-      nameLocation: 'middle',
-      nameGap: 45,
-      axisLabel: { margin: 12, color: axisTextColor, fontSize: VIZ_FONT.base },
-      nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
-      axisLine: { lineStyle: { color: axisLineColor } },
-      splitLine: { lineStyle: { color: gridLineColor } },
-    },
+    yAxis: densityAxis,
     series: [{
       type: 'bar',
       data: genusBar.values,
-      itemStyle: { color: CHART_PALETTES.genusBar[0] }
+      itemStyle: { color: CHART_PALETTES.genusBar[0], ...BAR_OUTLINE }
     }],
-    grid: { left: 60, right: 20, top: 50, bottom: genusBottomPad }
-  }), [genusBar, genusBottomPad, axisTextColor, axisLineColor, gridLineColor]);
+    grid: { left: 90, right: 20, top: 20, bottom: genusBottomPad }
+  }), [genusBar, genusBottomPad, axisTextColor, strongAxisLine, densityAxis]);
 
-  // 2) Scatter: GC% vs Z-DNA density, bubble ~ genome_size, color = superkingdom
-  const scatterData = useMemo(() => {
-    if (!vizDensityCol || !colGC) return [];
-    const pts: { gc: number; den: number; size: number; sk: string; label: string }[] = [];
-    for (const r of vizRows) {
-      const gc = Number(r[colGC]);
-      const den = Number(r[vizDensityCol]);
-      if (!Number.isFinite(gc) || !Number.isFinite(den)) continue;
-      const size = colGSize ? Number(r[colGSize]) : NaN;
-      const sk = colSK ? String(r[colSK] ?? '') : '';
-      const label = colAssembly ? String(r[colAssembly] ?? '') : (colTaxName ? String(r[colTaxName] ?? '') : '');
-      pts.push({ gc, den, size, sk, label });
-    }
-    return pts;
-  }, [vizRows, vizDensityCol, colGC, colGSize, colSK, colTaxName, colAssembly]);
+  // 2) Scatter: GC% vs Z-DNA density per species taxid, bubble ~ genome size, color = superkingdom
+  const scatterData = useMemo(
+    () => (charts?.points ?? []).filter(p => Number.isFinite(p.gc) && Number.isFinite(p.den)),
+    [charts]
+  );
 
   const bubbleSizer = useMemo(() => makeBubbleSizer(scatterData.map((p) => p.size)), [scatterData]);
 
@@ -632,7 +613,7 @@ export default function MetadataPage() {
       const k = p.sk || '(NA)';
       const arr = by.get(k) ?? [];
       arr.push({
-        value: [p.gc, p.den, p.size],
+        value: [p.gc, tickPosition(DENSITY_TICKS, p.den), p.size, p.den, p.n],
         name: p.label,
         label: { show: false },
       });
@@ -643,7 +624,7 @@ export default function MetadataPage() {
       name: k,
       type: 'scatter',
       data: by.get(k) ?? [],
-      symbolSize: (val: any[]) => bubbleSizer(Number(val?.[2] ?? NaN)),
+      symbolSize: (val: number[]) => bubbleSizer(Number(val?.[2] ?? NaN)),
       emphasis: { focus: 'series' },
       itemStyle: {
         color: SUPERKINGDOM_COLOR_MAP[k] ?? CHART_PALETTES.scatter[0],
@@ -653,24 +634,19 @@ export default function MetadataPage() {
 
   const scatterOption = useMemo(() => ({
     textStyle: { fontSize: VIZ_FONT.base },
-    // δεν χρειάζεται color εδώ, τα δίνουμε per-series
-    title: {
-      text: 'GC% vs Z-DNA density (/kb)',
-      left: 'center',
-      textStyle: { color: axisTextColor, fontSize: VIZ_FONT.title },
-    },
     tooltip: {
       trigger: 'item',
-      formatter: (p: any) => {
-        const [gc, den, sz] = p.value || [];
-        return `${p.seriesName}<br/>GC%: ${gc?.toFixed?.(2)}<br/>Z-DNA density (/kb): ${den?.toFixed?.(2)}${
-          Number.isFinite(sz) ? `<br/>Genome size: ${Math.round(sz)}` : ''
+      formatter: (p: ChartParam) => {
+        const [gc, , sz, den, n] = (p.value as number[] | undefined) ?? [];
+        return `${p.name}<br/>${p.seriesName}<br/>Assemblies: ${Number(n ?? 0).toLocaleString()}` +
+          `<br/>GC%: ${gc?.toFixed?.(2)}<br/>Z-DNA density (/kb): ${den?.toFixed?.(2)}${
+          Number.isFinite(sz) ? `<br/>Genome size: ${Math.round(sz).toLocaleString()} bp` : ''
         }`;
       },
       textStyle: { fontSize: VIZ_FONT.defaultTooltip },
     },
     legend: {
-      top: 28,
+      top: 0,
       data: skCats,
       textStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
     },
@@ -679,100 +655,85 @@ export default function MetadataPage() {
       name: 'GC %',
       nameLocation: 'middle',
       nameGap: 45,
-      axisLabel: { margin: 12, color: axisTextColor, fontSize: VIZ_FONT.base },
+      axisLabel: { margin: 12, color: axisTextColor, fontSize: X_LABEL_FONT },
       nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
-      axisLine: { lineStyle: { color: axisLineColor } },
+      axisLine: strongAxisLine,
+      splitLine: { lineStyle: { color: gridLineColor } },
+    },
+    yAxis: densityAxis,
+    series: scatterSeries,
+    grid: { left: 70, right: 20, top: 40, bottom: 60 },
+  }), [scatterSeries, skCats, axisTextColor, strongAxisLine, gridLineColor, densityAxis]);
+
+  // Shared options for the two histograms (one value per species taxid).
+  const histogramOption = useCallback((
+    hist: { labels: string[]; ranges: string[]; counts: number[] },
+    bottom: number, xName: string, color: string,
+  ) => ({
+    textStyle: { fontSize: VIZ_FONT.base },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: { dataIndex: number; value: number }[]) =>
+        `${hist.ranges[params[0]?.dataIndex] ?? ''}<br/>Species taxids: ${Number(params[0]?.value ?? 0).toLocaleString()}`,
+      textStyle: { fontSize: VIZ_FONT.defaultTooltip },
+    },
+    xAxis: {
+      type: 'category',
+      data: hist.labels,
+      axisLabel: {
+        interval: 0,
+        rotate: 45,
+        margin: 12,
+        fontSize: X_LABEL_FONT,
+        hideOverlap: true,
+        color: axisTextColor,
+      },
+      name: xName,
+      nameLocation: 'middle',
+      nameGap: bottom - 30,
+      nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
+      axisLine: strongAxisLine,
     },
     yAxis: {
       type: 'value',
-      name: 'Z-DNA density (/kb)',
+      name: 'Species taxids',
       nameLocation: 'middle',
-      nameGap: 45,
+      nameGap: 68,
       axisLabel: { margin: 12, color: axisTextColor, fontSize: VIZ_FONT.base },
       nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
-      axisLine: { lineStyle: { color: axisLineColor } },
+      axisLine: strongAxisLine,
       splitLine: { lineStyle: { color: gridLineColor } },
     },
-    series: scatterSeries,
-    grid: { left: 70, right: 20, top: 70, bottom: 60 },
-  }), [scatterSeries, skCats, axisTextColor, axisLineColor, gridLineColor]);
+    series: [{ type: 'bar', data: hist.counts, itemStyle: { color, ...BAR_OUTLINE } }],
+    grid: { left: 85, right: 30, top: 20, bottom },
+  }) as echarts.EChartsOption, [axisTextColor, strongAxisLine, gridLineColor]);
 
-  // 3) Genome size histogram
-  const colGSizeLbl = useMemo(() => findColSmart(vizCols, 'genome_size'), [vizCols]);
-  const histGenome = useMemo(() => {
-    if (!colGSizeLbl) return { labels: [], counts: [] };
-    return buildHistogram(vizRows.map(r => Number(r[colGSizeLbl])));
-  }, [vizRows, colGSizeLbl]);
+  // 3) Genome size histogram (genome_size_manual, mean per species taxid)
+  const histGenome = useMemo(
+    () => genomeSizeHistogram(scatterData.map(p => p.size)),
+    [scatterData]
+  );
 
-const histGenomeBottom = useMemo(
-  () => estimateBottomPadding(histGenome.labels, {
-    min: 120,   // λίγο μεγαλύτερη βάση
-    perChar: 4, // πιο γενναιόδωρος χώρος ανά χαρακτήρα
-    max: 260,
-  }),
-  [histGenome]
-);
-
+  const histGenomeBottom = useMemo(
+    () => estimateBottomPadding(histGenome.labels, { min: 60, perChar: 7, max: 200 }),
+    [histGenome]
+  );
 
   const histGenomeHeight = useMemo(
     () => chartHeightFromBottom(histGenomeBottom),
     [histGenomeBottom]
   );
 
-  const histGenomeOption = useMemo(() => {
-    return {
-      textStyle: { fontSize: VIZ_FONT.base },
-      color: CHART_PALETTES.histGenome,
-      title: {
-        text: 'Genome Size distribution',
-        left: 'center',
-        textStyle: { color: axisTextColor, fontSize: VIZ_FONT.title },
-      },
-      tooltip: { trigger: 'axis', textStyle: { fontSize: VIZ_FONT.defaultTooltip } },
-      xAxis: {
-        type: 'category',
-        data: histGenome.labels,
-        axisLabel: {
-          interval: 0,
-          rotate: 70,
-          margin: 18,
-          width: 80,
-          overflow: 'break',
-          lineHeight: 12,
-          fontSize: VIZ_FONT.histogramCompact,
-          hideOverlap: true,
-          color: axisTextColor,
-        },
-        name: 'Genome size',
-        nameLocation: 'middle',
-        nameGap: 120,
-        nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
-        axisLine: { lineStyle: { color: axisLineColor } },
-      },
-      yAxis: {
-        type: 'value',
-        name: 'Count',
-        nameLocation: 'middle',
-        nameGap: 45,
-        axisLabel: { margin: 12, color: axisTextColor, fontSize: VIZ_FONT.base },
-        nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
-        axisLine: { lineStyle: { color: axisLineColor } },
-        splitLine: { lineStyle: { color: gridLineColor } },
-      },
-      series: [{ type: 'bar', data: histGenome.counts }],
-      grid: { left: 60, right: 20, top: 50, bottom: histGenomeBottom },
-    } as echarts.EChartsOption;
-  }, [histGenome, histGenomeBottom, axisTextColor, axisLineColor, gridLineColor]);
+  const histGenomeOption = useMemo(
+    () => histogramOption(histGenome, histGenomeBottom, 'Genome size (kb, bin start)', CHART_PALETTES.histGenome[0]),
+    [histogramOption, histGenome, histGenomeBottom]
+  );
 
-  // 4) GC% histogram
-  const histGC = useMemo(() => {
-    const c = colGC;
-    if (!c) return { labels: [], counts: [] };
-    return buildHistogram(vizRows.map(r => Number(r[c])));
-  }, [vizRows, colGC]);
+  // 4) GC% histogram (mean per species taxid)
+  const histGC = useMemo(() => gcHistogram(scatterData.map(p => p.gc), 16), [scatterData]);
 
   const histGCBottom = useMemo(
-    () => estimateBottomPadding(histGC.labels),
+    () => estimateBottomPadding(histGC.labels, { min: 60, perChar: 7, max: 160 }),
     [histGC]
   );
 
@@ -781,51 +742,11 @@ const histGenomeBottom = useMemo(
     [histGCBottom]
   );
 
-  const histGCOption = useMemo(() => {
-    return {
-      textStyle: { fontSize: VIZ_FONT.base },
-      color: CHART_PALETTES.histGC,
-      title: {
-        text: 'GC% distribution',
-        left: 'center',
-        textStyle: { color: axisTextColor, fontSize: VIZ_FONT.title },
-      },
-      tooltip: { trigger: 'axis', textStyle: { fontSize: VIZ_FONT.defaultTooltip } },
-      xAxis: {
-        type: 'category',
-        data: histGC.labels,
-        axisLabel: {
-          interval: 0,
-          rotate: 45,
-          margin: 18,
-          width: 90,
-          overflow: 'break',
-          lineHeight: 14,
-          color: axisTextColor,
-          fontSize: VIZ_FONT.base,
-        },
-        name: 'GC %',
-        nameLocation: 'middle',
-        nameGap: 60,
-        nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
-        axisLine: { lineStyle: { color: axisLineColor } },
-      },
-      yAxis: {
-        type: 'value',
-        name: 'Count',
-        nameLocation: 'middle',
-        nameGap: 45,
-        axisLabel: { margin: 12, color: axisTextColor, fontSize: VIZ_FONT.base },
-        nameTextStyle: { color: axisTextColor, fontSize: VIZ_FONT.base },
-        axisLine: { lineStyle: { color: axisLineColor } },
-        splitLine: { lineStyle: { color: gridLineColor } },
-      },
-      series: [{ type: 'bar', data: histGC.counts }],
-      grid: { left: 60, right: 20, top: 50, bottom: histGCBottom },
-    } as echarts.EChartsOption;
-  }, [histGC, histGCBottom, axisTextColor, axisLineColor, gridLineColor]);
+  const histGCOption = useMemo(
+    () => histogramOption(histGC, histGCBottom, 'GC %', CHART_PALETTES.histGC[0]),
+    [histogramOption, histGC, histGCBottom]
+  );
 
-  // Συνάρτηση για κεφαλαίο το πρώτο γράμμα και αντικατάσταση των κάτω παυλών με κενά
   const capitalize = (str: string) => {
     if (!str) return str;
     const s = String(str).replace(/_/g, ' ');
@@ -839,11 +760,10 @@ const histGenomeBottom = useMemo(
 
   const syncScroll = (source: HTMLElement, target: HTMLElement | null) => {
     if (!target) return;
-    if (isSyncingRef.current) return; // μην κάνεις «μπαλάκι» τα events
+    if (isSyncingRef.current) return;
 
     isSyncingRef.current = true;
     target.scrollLeft = source.scrollLeft;
-    // reset στο επόμενο animation frame
     window.requestAnimationFrame(() => {
       isSyncingRef.current = false;
     });
@@ -905,11 +825,10 @@ const histGenomeBottom = useMemo(
           <MenuItem onClick={() => exportData('tsv')}>Export TSV</MenuItem>
           <MenuItem onClick={() => exportData('json')}>Export JSON</MenuItem>
           <MenuItem onClick={() => exportData('xml')}>Export XML</MenuItem>
-          <MenuItem onClick={() => exportData('xlsx')}>Export Excel (.xlsx)</MenuItem>
+          <MenuItem onClick={() => exportData('xlsx')}>Export Excel (.xls)</MenuItem>
         </Menu>
 
         <Divider orientation="vertical" flexItem sx={{ mx: 1 }} />
-        {/* column selector με labels από METADATA_COLUMNS */}
         <ColumnVisibilityMenu
           columns={METADATA_COLUMNS.map(c => c.label)}
           visibility={columnsVisible}
@@ -1079,7 +998,6 @@ const histGenomeBottom = useMemo(
                         <TableRow>
                           {visibleColumnDefs.map((c) => (
                             <TableCell key={c.key!}>
-                              {/* label από METADATA_COLUMNS, ειδική μεταχείριση species αν θες */}
                               {c.label || capitalize(c.key!)}
                             </TableCell>
                           ))}
@@ -1087,7 +1005,7 @@ const histGenomeBottom = useMemo(
                       </TableHead>
                       <TableBody>
                         {sortedRows.map((row, i) => (
-                          <TableRow key={row.id ?? `${page}-${i}`}>
+                          <TableRow key={String(row.id ?? `${page}-${i}`)}>
                             {visibleColumnDefs.map((colMeta) => {
                               const colKey = colMeta.key!;
                               const rawVal = row[colKey];
@@ -1161,7 +1079,7 @@ const histGenomeBottom = useMemo(
               <Box sx={{ p: 3, display: 'flex', justifyContent: 'center' }}>
                 <CircularProgress />
               </Box>
-            ) : vizRows.length === 0 ? (
+            ) : !charts || charts.points.length === 0 ? (
               <Box sx={{ p: 3, textAlign: 'center' }}>
                 <Typography variant="body2" color="text.secondary">
                   No data for current filters.
@@ -1170,7 +1088,10 @@ const histGenomeBottom = useMemo(
             ) : (
               <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' } }}>
                 {/* 1) Top genera by taxid-balanced mean density */}
-                <Paper variant="outlined" sx={{ p: 1 }}>
+                <Paper variant="outlined" sx={{ p: 2 }}>
+                  <Typography variant="subtitle2" sx={{ mb: 1, fontSize: VIZ_MUI_FONT.chartTitle }}>
+                    Z-DNA mean density by genus (/kb; lowest and highest)
+                  </Typography>
                   {genusBar.cats.length > 0 ? (
                     <ReactECharts option={genusBarOption} style={{ height: genusChartHeight }} />
                   ) : (
@@ -1183,7 +1104,10 @@ const histGenomeBottom = useMemo(
                 </Paper>
 
                 {/* 2) Scatter GC% vs density */}
-                <Paper variant="outlined" sx={{ p: 1 }}>
+                <Paper variant="outlined" sx={{ p: 2 }}>
+                  <Typography variant="subtitle2" sx={{ mb: 1, fontSize: VIZ_MUI_FONT.chartTitle }}>
+                    GC% vs Z-DNA density (/kb)
+                  </Typography>
                   {scatterSeries.length > 0 ? (
                     <ReactECharts option={scatterOption} style={{ height: 420 }} />
                   ) : (
@@ -1196,7 +1120,10 @@ const histGenomeBottom = useMemo(
                 </Paper>
 
                 {/* 3) Genome size histogram */}
-                <Paper variant="outlined" sx={{ p: 1 }}>
+                <Paper variant="outlined" sx={{ p: 2 }}>
+                  <Typography variant="subtitle2" sx={{ mb: 1, fontSize: VIZ_MUI_FONT.chartTitle }}>
+                    Genome size distribution
+                  </Typography>
                   {histGenome.labels.length > 0 ? (
                     <ReactECharts option={histGenomeOption} style={{ height: histGenomeHeight }} />
                   ) : (
@@ -1209,7 +1136,10 @@ const histGenomeBottom = useMemo(
                 </Paper>
 
                 {/* 4) GC% histogram */}
-                <Paper variant="outlined" sx={{ p: 1 }}>
+                <Paper variant="outlined" sx={{ p: 2 }}>
+                  <Typography variant="subtitle2" sx={{ mb: 1, fontSize: VIZ_MUI_FONT.chartTitle }}>
+                    GC% distribution
+                  </Typography>
                   {histGC.labels.length > 0 ? (
                     <ReactECharts option={histGCOption} style={{ height: histGCHeight }} />
                   ) : (

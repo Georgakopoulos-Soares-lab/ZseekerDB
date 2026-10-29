@@ -5,7 +5,7 @@ import { Link as RouterLink } from 'react-router-dom';
 
 export default function Brand() {
   const theme = useTheme();
-  const id = React.useId(); // για μοναδικά ids στο gradient
+  const id = React.useId();
 
   return (
     <Box
@@ -28,7 +28,6 @@ export default function Brand() {
           </linearGradient>
         </defs>
 
-        {/* Καμπύλες της έλικας */}
         <path
           d="M16,8 C36,8 28,28 48,28"
           stroke={`url(#g1-${id})`}
@@ -43,7 +42,6 @@ export default function Brand() {
           fill="none"
           strokeLinecap="round"
         />
-        {/* «σκαλοπάτια» */}
         <g stroke={alpha(theme.palette.primary.main, 0.6)} strokeWidth="3">
           <line x1="20" y1="16" x2="44" y2="16" />
           <line x1="20" y1="26" x2="44" y2="26" />
@@ -52,7 +50,6 @@ export default function Brand() {
         </g>
       </svg>
 
-      {/* Λογότυπο κειμένου */}
       <Typography variant="h6" fontWeight={800} sx={{ lineHeight: 1 }}>
         ZSeeker
         <Typography

@@ -27,6 +27,8 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=backend-build /out/zseeker-api /app/zseeker-api
 COPY --from=frontend-build /src/frontend/dist /app/frontend/dist
+# Full release metadata read by the homepage KPIs (METADATA_GLOB).
+COPY data/metadata.tsv.gz /app/data/metadata.tsv.gz
 
 ENV GIN_MODE=release \
     PORT=8080 \

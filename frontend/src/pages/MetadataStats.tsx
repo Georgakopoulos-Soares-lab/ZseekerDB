@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Box,
   Paper,
@@ -17,30 +17,14 @@ import {
   TREEMAP_SERIES_BOUNDS,
 } from '../utils/treemapLayout';
 import { VIZ_FONT, VIZ_MUI_FONT } from '../utils/visualizationTypography';
+import { SK_COLORS } from '../utils/superkingdomColors';
+import { runSQL } from '../utils/sql';
+import { shortenTaxonLabel } from '../utils/shortenLabel';
 
 /* =============================================================================
    helpers
    ========================================================================== */
 
-async function fetchSql<T = any>(sql: string): Promise<T[]> {
-  const normalized = sql.replace(/\s+/g, ' ').trim();
-  const url = `/api/sql?query=${encodeURIComponent(normalized)}`;
-  const r = await fetch(url, { headers: { Accept: 'application/json' }, cache: 'no-store' });
-
-  const text = await r.text();
-  let j: any = null;
-  try { j = JSON.parse(text); } catch { /* ignore */ }
-
-  if (!r.ok) {
-    const msg = (j && j.error) ? String(j.error) : `SQL HTTP ${r.status}`;
-    throw new Error(msg);
-  }
-
-  const rows = (Array.isArray(j?.rows) ? j.rows
-    : Array.isArray(j?.data) ? j.data
-      : []) as T[];
-  return rows;
-}
 
 const fmtInt = (n: number | null | undefined) =>
   (typeof n === 'number' && Number.isFinite(n)) ? n.toLocaleString() : '—';
@@ -53,19 +37,17 @@ const fmtBig = (n: number | null | undefined) =>
 
 type KV = { label: string; n: number };
 
-/** Βασική παλέτα superkingdoms (ίδια με home / metadata) */
-const SUPERKINGDOM_COLORS = ['#4D77A9', '#F08F2A', '#E25558', '#77B7B3'] as const;
-
-/** Κανονικοποίηση superkingdom σε 4 σταθερές κατηγορίες */
 const SK_ORDER = ['Archaea', 'Bacteria', 'Eukaryota', 'Viruses'] as const;
+const TOP_LEVEL_MIN_SHARE = 0.06;
+// Tile labels sit on light superkingdom colours, so they stay dark in both themes.
+const TREEMAP_LABEL_COLOR = '#111111';
 type SK = typeof SK_ORDER[number];
 
-/** Σταθερό χρώμα ανά superkingdom */
 const SK_COLOR: Record<SK, string> = {
-  Archaea: SUPERKINGDOM_COLORS[0],
-  Bacteria: SUPERKINGDOM_COLORS[1],
-  Eukaryota: SUPERKINGDOM_COLORS[2],
-  Viruses: SUPERKINGDOM_COLORS[3],
+  Archaea: SK_COLORS.Archaea,
+  Bacteria: SK_COLORS.Bacteria,
+  Eukaryota: SK_COLORS.Eukaryota,
+  Viruses: SK_COLORS.Viruses,
 };
 
 
@@ -75,18 +57,9 @@ function canonSK(s: string | null): SK | null {
   if (x === 'bacteria') return 'Bacteria';
   if (x === 'eukaryota' || x === 'eukaryotes' || x === 'eukaryote') return 'Eukaryota';
   if (x === 'viruses' || x === 'virus') return 'Viruses';
-  return null; // κρατάμε αυστηρά τα 4
+  return null;
 }
 
-/** Σταθερό base χρώμα ανά superkingdom (ώστε το 1ο επίπεδο να μην “λευκίζει”) */
-/*
-const SK_COLOR: Record<SK, string> = {
-  Archaea:  '#1558C4',
-  Bacteria: '#1C66DF',
-  Eukaryota:'#2A73F2',
-  Viruses:  '#0B3C8C',
-};
-*/
 /* ------------------------------- UI micro components ------------------------------- */
 
 /* =============================================================================
@@ -123,7 +96,6 @@ export default function MetadataStats() {
   const [totalGenus, setTotalGenus] = useState<number | null>(null);
 
   // side metrics
-  const [superkingdoms, setSuperkingdoms] = useState<KV[]>([]);
   const [topKingdoms, setTopKingdoms] = useState<KV[]>([]);
   const [topGenus, setTopGenus] = useState<KV[]>([]);
   const [assemblyLevels, setAssemblyLevels] = useState<KV[]>([]);
@@ -141,7 +113,8 @@ export default function MetadataStats() {
         setLoading(true);
         setError(null);
 
-        // 1) Overview
+        // 1) Overview. Averages are species-taxid-balanced: mean per species taxid, then
+        // mean of means. (No `--` comments inside the SQL: queries are sent as one line.)
         const overviewSql = `
           SELECT
             COUNT(*)                                AS total_assemblies,
@@ -152,64 +125,56 @@ export default function MetadataStats() {
             count(distinct "order") AS total_orders,
             count(distinct family) AS total_families, 
             count(distinct genus) AS total_genus,
-            count(distinct genus) AS total_genus,
-            COUNT(DISTINCT taxid)                   AS unique_taxids,
-            AVG(try_cast(genome_size AS DOUBLE))    AS avg_genome_size,
-            MIN(try_cast(genome_size AS DOUBLE))    AS min_genome_size,
-            MAX(try_cast(genome_size AS DOUBLE))    AS max_genome_size,
-            ROUND(AVG(try_cast(gc_percent  AS DOUBLE)), 2)    AS avg_gc,
+            COUNT(DISTINCT species_taxid)           AS unique_taxids,
+            (SELECT AVG(v) FROM (SELECT AVG(try_cast(genome_size_manual AS DOUBLE)) AS v
+               FROM metadata WHERE genome_size_manual >= 1000 GROUP BY species_taxid)) AS avg_genome_size,
+            MIN(try_cast(genome_size_manual AS DOUBLE)) AS min_genome_size,
+            MAX(try_cast(genome_size_manual AS DOUBLE)) AS max_genome_size,
+            (SELECT ROUND(AVG(v), 2) FROM (SELECT AVG(try_cast(gc_percent AS DOUBLE)) AS v
+               FROM metadata WHERE genome_size_manual >= 1000 GROUP BY species_taxid)) AS avg_gc,
             MIN(try_cast(gc_percent  AS DOUBLE))    AS min_gc,
             MAX(try_cast(gc_percent  AS DOUBLE))    AS max_gc
           FROM metadata
-          WHERE genome_size >= 1000
+          WHERE genome_size_manual >= 1000
         `;
-        const [ov] = await fetchSql<any>(overviewSql);
+        const [ov] = await runSQL<Record<string, unknown>>(overviewSql);
 
-        // 2) Superkingdoms (sidebar)
-        const superSql = `
-          SELECT coalesce(superkingdom,'(unknown)') AS label, COUNT(*) AS n
-          FROM metadata
-          WHERE genome_size >= 1000
-          GROUP BY 1
-          ORDER BY n DESC
-        `;
-        const sup = await fetchSql<KV>(superSql);
-
-        // 3) Top 5 Kingdoms
+        // 3) Top 5 kingdoms by unique species taxids
         const topKSql = `
-          SELECT kingdom AS label, COUNT(*) AS n
+          SELECT kingdom AS label, COUNT(DISTINCT species_taxid) AS n
           FROM metadata
-          WHERE kingdom IS NOT NULL AND kingdom <> '' AND genome_size >= 1000
+          WHERE kingdom IS NOT NULL AND kingdom <> '' AND kingdom NOT ILIKE '%unclassified%'
+            AND genome_size_manual >= 1000
           GROUP BY 1
           ORDER BY n DESC
           LIMIT 5
         `;
-        const tK = await fetchSql<KV>(topKSql);
+        const tK = await runSQL<KV>(topKSql);
 
-        // 4) Top 5 Genus
+        // 4) Top 5 genera by unique species taxids
         const topGSql = `
-          SELECT genus AS label, COUNT(*) AS n
+          SELECT genus AS label, COUNT(DISTINCT species_taxid) AS n
           FROM metadata
           WHERE genus IS NOT NULL AND genus <> '' AND 
-            genus NOT LIKE '%unclassified%' AND 
-            genome_size >= 1000
+            genus NOT ILIKE '%unclassified%' AND 
+            genome_size_manual >= 1000
           GROUP BY 1
           ORDER BY n DESC
           LIMIT 5
         `;
-        const tG = await fetchSql<KV>(topGSql);
+        const tG = await runSQL<KV>(topGSql);
 
         // 5) Assembly levels
         const asmSql = `
           SELECT coalesce(assembly_level,'(unknown)') AS label, COUNT(*) AS n
           FROM metadata
-          WHERE genome_size >= 1000
+          WHERE genome_size_manual >= 1000
           GROUP BY 1
           ORDER BY n DESC
         `;
-        const asm = await fetchSql<KV>(asmSql);
+        const asm = await runSQL<KV>(asmSql);
 
-        // 6) Full rank-by-rank drill-down distribution.
+        // 6) Full rank-by-rank drill-down distribution (unique-taxid counts are per species taxid).
         const distSql = `
           SELECT
             superkingdom,
@@ -221,13 +186,13 @@ export default function MetadataStats() {
             family,
             genus,
             tax_name,
-            taxid,
+            species_taxid AS taxid,
             COUNT(*) AS assembly_count
           FROM metadata
-          WHERE genome_size >= 1000
+          WHERE genome_size_manual >= 1000
           GROUP BY 1,2,3,4,5,6,7,8,9,10
         `;
-        const dist = await fetchSql<TaxonomyTreeRow>(distSql);
+        const dist = await runSQL<TaxonomyTreeRow>(distSql);
 
         if (cancelled) return;
 
@@ -249,7 +214,6 @@ export default function MetadataStats() {
         setTotalFamilies(Number(ov?.total_families ?? null));
         setTotalGenus(Number(ov?.total_genus ?? null));
 
-        setSuperkingdoms(sup);
         setTopKingdoms(tK);
         setTopGenus(tG);
         setAssemblyLevels(asm);
@@ -260,16 +224,24 @@ export default function MetadataStats() {
         });
         const built = buildTaxonomyTree(canonicalRows);
         const bySuperkingdom = new Map(built.map(node => [node.name, node]));
+        // At the superkingdom level every tile gets at least TOP_LEVEL_MIN_SHARE of the
+        // area so small ones (Archaea) still show their label; deeper levels are unchanged
+        // because children always fill their parent's tile.
+        const topTotal = built.reduce((sum, node) => sum + node.value, 0);
         const data = SK_ORDER.flatMap(superkingdom => {
           const node = bySuperkingdom.get(superkingdom);
           return node
-            ? [{ ...node, itemStyle: { color: SK_COLOR[superkingdom] } }]
+            ? [{
+              ...node,
+              value: Math.max(node.value, topTotal * TOP_LEVEL_MIN_SHARE),
+              itemStyle: { color: SK_COLOR[superkingdom] },
+            }]
             : [];
         });
         setTreeData(data);
 
-      } catch (e: any) {
-        setError(e?.message || 'Failed to load stats');
+      } catch (e) {
+        setError((e instanceof Error && e.message) || 'Failed to load stats');
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -302,16 +274,11 @@ export default function MetadataStats() {
     };
   }, [hasData]);
 
-  const avgGenomeText =
-    typeof avgGenome === 'number' && Number.isFinite(avgGenome)
-      ? avgGenome.toLocaleString('en-US', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      })
-      : '—';
-
-  const minGenomeText = fmtBig(minGenome);
-  const maxGenomeText = fmtBig(maxGenome);
+  // Genome sizes in whole bp.
+  const roundBp = (n: number | null) => (typeof n === 'number' && Number.isFinite(n) ? Math.round(n) : null);
+  const avgGenomeText = fmtBig(roundBp(avgGenome));
+  const minGenomeText = fmtBig(roundBp(minGenome));
+  const maxGenomeText = fmtBig(roundBp(maxGenome));
 
   const avgGcText = fmtPercent(avgGC, 2);
   const minGcText = fmtPercent(minGC, 2);
@@ -323,10 +290,10 @@ export default function MetadataStats() {
     textStyle: { fontSize: VIZ_FONT.base },
 
     tooltip: {
-      formatter: (info: any) => {
-        const node = info.data as TreeNode;
+      formatter: (info: { data: TreeNode; treePathInfo?: { name?: string }[] }) => {
+        const node = info.data;
         const path = (info.treePathInfo ?? [])
-          .map((part: { name?: string }) => part.name)
+          .map(part => part.name)
           .filter(Boolean)
           .join(' › ');
         return [
@@ -356,7 +323,7 @@ export default function MetadataStats() {
       label: {
         show: true,
         formatter: '{b}',
-        color: isDarkMode ? '#ffffff' : '#111111',   // 👈 ΔΥΝΑΜΙΚΟ ΧΡΩΜΑ
+        color: TREEMAP_LABEL_COLOR,
         overflow: 'truncate',
         fontSize: VIZ_FONT.treemapLabel,
         minFontSize: VIZ_FONT.treemapMin,
@@ -365,47 +332,28 @@ export default function MetadataStats() {
       upperLabel: {
         show: true,
         height: 35,
-        color: isDarkMode ? '#ffffff' : '#111111',   // 👈 ΔΥΝΑΜΙΚΟ ΧΡΩΜΑ
+        // The header (current group name) sits on the page background, not on a tile.
+        color: isDarkMode ? '#ffffff' : '#111111',
         formatter: '{b}',
         textStyle: {
           fontSize: VIZ_FONT.treemapHeader,
           fontWeight: 600,
-          color: isDarkMode ? '#ffffff' : '#111111', // 👈 ΕΠΙΠΛΕΟΝ εδώ
+          color: isDarkMode ? '#ffffff' : '#111111',
         },
       },
 
-      // Γενικό style: ΚΑΘΟΛΟΥ άσπρα borders
       itemStyle: {
         borderColor: 'transparent',
         borderWidth: 0,
       },
 
-      // 🔹 breadcrumb ΜΕΣΑ στη σειρά, ΟΧΙ μέσα στο levels[]
-      breadcrumb: {
-        show: true,
-        height: 35,
-        left: 'center',
-        bottom: 4,
-        itemStyle: {
-          color: breadcrumbBg,       // από το theme (dark / light)
-          borderColor: 'transparent',
-        },
-        textStyle: {
-          color: breadcrumbText,     // π.χ. #FFFFFF
-          fontSize: VIZ_FONT.base,
-          fontWeight: 500,
-        },
-        emphasis: {
-          itemStyle: { color: breadcrumbBg },
-          textStyle: { color: breadcrumbText },
-        },
-      },
+      // Drawn below the chart instead (tilted, abbreviated labels): see TaxonomyBreadcrumb.
+      breadcrumb: { show: false },
 
-      // επίπεδα treemap
       levels: [
         {
           // level 0: Superkingdoms
-          minArea: 4000, // δίνει αρκετό χώρο ώστε να φανούν και Eukaryota / Archaea
+          minArea: 4000,
           itemStyle: {
             borderColor: 'transparent',
             borderWidth: 0,
@@ -445,13 +393,49 @@ export default function MetadataStats() {
         { itemStyle: { borderColor: 'transparent', borderWidth: 0, gapWidth: 1 } },
       ],
     }],
-  }), [treeData, breadcrumbBg, breadcrumbText, isDarkMode]);
+  }), [treeData, isDarkMode]);
+
+  // ---------------------------- Taxonomy breadcrumb ----------------------------
+  // Follows the treemap's view root; clicking a crumb rolls the treemap up to it.
+  type TreemapNode = { name: string; parentNode?: TreemapNode };
+  const crumbNodes = useRef<TreemapNode[]>([]);
+  const [crumbs, setCrumbs] = useState<string[]>(['Taxonomy']);
+
+  const syncCrumbs = useCallback(() => {
+    const chart = treemapChartRef.current?.getEchartsInstance() as unknown as {
+      getModel: () => { getSeriesByIndex: (i: number) => { getViewRoot: () => TreemapNode } | undefined };
+    } | undefined;
+    const viewRoot = chart?.getModel().getSeriesByIndex(0)?.getViewRoot();
+    const path: TreemapNode[] = [];
+    for (let node = viewRoot; node; node = node.parentNode) path.unshift(node);
+    crumbNodes.current = path;
+    setCrumbs(path.length ? path.map(n => n.name) : ['Taxonomy']);
+  }, []);
+
+  // A new option (data or theme) resets the treemap to the top level.
+  useEffect(() => {
+    crumbNodes.current = [];
+    setCrumbs(['Taxonomy']);
+  }, [treemapOption]);
+
+  const goToCrumb = (index: number) => {
+    const target = crumbNodes.current[index];
+    if (!target || index === crumbs.length - 1) return;
+    treemapChartRef.current?.getEchartsInstance().dispatchAction({
+      type: 'treemapRootToNode',
+      seriesIndex: 0,
+      targetNode: target,
+    });
+  };
+
+  const treemapEvents = useMemo(() => ({
+    treemaproottonode: () => window.setTimeout(syncCrumbs, 0),
+  }), [syncCrumbs]);
 
   /* -------------------------------------- UI ------------------------------------- */
 
   return (
     <Box sx={{ p: 2 }}>
-      {/* Τίτλος σελίδας */}
       <Typography
         variant="h5"
         align="center"
@@ -481,12 +465,9 @@ export default function MetadataStats() {
             gap: 2
           }}
         >
-          {/* --------------------------- ΚΕΝΤΡΙΚΗ ΠΕΡΙΟΧΗ --------------------------- */}
           <Box sx={{ minWidth: 0, width: '100%' }}>
-            {/* KPIs πάνω από το treemap (2 σειρές, ίσο μέγεθος) */}
 
 
-            {/* KPIs πάνω από το treemap – grouped */}
             <Box sx={{ mb: 4, mt: 2, display: 'grid', rowGap: 1 }}>
 
               {/* ======== Totals ======== */}
@@ -511,7 +492,7 @@ export default function MetadataStats() {
                     sm: 'repeat(auto-fill, minmax(130px, 1fr))',
                     md: 'repeat(auto-fill, minmax(140px, 1fr))',
                   },
-                  gap: 1.0,   // μικρότερο gap
+                  gap: 1.0,
                 }}
               >
                 {[
@@ -587,8 +568,8 @@ export default function MetadataStats() {
                 sx={{
                   display: 'grid',
                   gridTemplateColumns: {
-                    xs: 'repeat(auto-fill, minmax(140px, 1fr))',
-                    sm: 'repeat(auto-fill, minmax(150px, 1fr))',
+                    xs: 'repeat(auto-fill, minmax(170px, 1fr))',
+                    sm: 'repeat(auto-fill, minmax(200px, 1fr))',
                   },
                   gap: 1.5,
                 }}
@@ -659,8 +640,8 @@ export default function MetadataStats() {
                 sx={{
                   display: 'grid',
                   gridTemplateColumns: {
-                    xs: 'repeat(auto-fill, minmax(140px, 1fr))',
-                    sm: 'repeat(auto-fill, minmax(150px, 1fr))',
+                    xs: 'repeat(auto-fill, minmax(170px, 1fr))',
+                    sm: 'repeat(auto-fill, minmax(200px, 1fr))',
                   },
                   gap: 1.5,
                 }}
@@ -716,7 +697,6 @@ export default function MetadataStats() {
 
 
 
-            {/* Treemap με διαφανές background & τετράγωνο layout */}
             <Box
               ref={treemapContainerRef}
               data-testid="taxonomy-treemap-container"
@@ -734,60 +714,66 @@ export default function MetadataStats() {
                 ref={treemapChartRef}
                 style={{ width: '100%', height: '100%' }}
                 option={treemapOption}
-                notMerge={true}                // <-- σημαντικό
+                onEvents={treemapEvents}
+                notMerge={true}
               />
 
             </Box>
+
+            {/* Breadcrumb: one slot per rank, labels abbreviated and tilted 45° downwards
+                so they never overlap each other or the treemap above. */}
+            <Box
+              data-testid="taxonomy-breadcrumb"
+              sx={{ mx: 'auto', width: '100%', maxWidth: '70vh', mt: 2, height: 130, display: 'flex' }}
+            >
+              {crumbs.map((name, i) => {
+                const current = i === crumbs.length - 1;
+                // The top level lists the superkingdoms.
+                const label = i === 0 ? 'Superkingdom' : name;
+                return (
+                  // Up to 9 ranks (Taxonomy … genus); 130px on the right leave room for the last
+                  // tilted label. Slots let clicks through: tilted labels reach into the next slot.
+                  <Box key={`${i}-${name}`} sx={{ flex: '0 0 calc((100% - 130px) / 9)', position: 'relative', minWidth: 0, pointerEvents: 'none' }}>
+                    <Box
+                      component="button"
+                      type="button"
+                      title={label}
+                      onClick={() => goToCrumb(i)}
+                      sx={{
+                        position: 'absolute',
+                        left: '50%',
+                        top: 0,
+                        transform: 'rotate(45deg)',
+                        transformOrigin: '0 50%',
+                        whiteSpace: 'nowrap',
+                        border: 0,
+                        borderRadius: 1,
+                        px: 1,
+                        py: 0.25,
+                        font: 'inherit',
+                        fontSize: VIZ_FONT.base,
+                        bgcolor: breadcrumbBg,
+                        color: breadcrumbText,
+                        fontWeight: current ? 700 : 500,
+                        cursor: current ? 'default' : 'pointer',
+                        pointerEvents: 'auto',
+                        '&:hover': current ? undefined : { textDecoration: 'underline' },
+                      }}
+                    >
+                      {i > 0 ? '› ' : ''}{shortenTaxonLabel(label)}
+                    </Box>
+                  </Box>
+                );
+              })}
+            </Box>
           </Box>
 
-          {/* ------------------------------- ΔΕΞΙ SIDEBAR ------------------------------ */}
           <Box sx={{
             display: 'grid',
             rowGap: 2,
             position: { lg: 'sticky' as const },
             top: { lg: 16 }
           }}>
-            {/* Superkingdoms */}
-            <Paper
-              elevation={1}
-              sx={{
-                p: 3,
-                bgcolor: 'background.paper',
-                borderRadius: 2
-              }}
-            >
-              <Typography
-                variant="h6"
-                sx={{ mb: 2, fontWeight: 500, fontSize: VIZ_MUI_FONT.cardTitle }}
-              >
-                Assemblies in each superkingdom (counts)
-              </Typography>
-              {superkingdoms.map((item) => (
-                <Box
-                  key={item.label}
-                  sx={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    py: 0.75
-                  }}
-                >
-                  <Typography sx={{ color: 'text.primary' }}>
-                    {item.label}
-                  </Typography>
-                  <Typography
-                    sx={{
-                      color: 'text.secondary',
-                      fontFamily: 'monospace',
-                      fontSize: VIZ_MUI_FONT.sidebarCount
-                    }}
-                  >
-                    {fmtInt(item.n)}
-                  </Typography>
-                </Box>
-              ))}
-            </Paper>
-
             {/* Top 5 Kingdoms */}
             <Paper
               elevation={1}
@@ -801,7 +787,7 @@ export default function MetadataStats() {
                 variant="h6"
                 sx={{ mb: 2, fontWeight: 500, fontSize: VIZ_MUI_FONT.cardTitle }}
               >
-                Top 5 kingdoms by assemblies
+                Top 5 kingdoms by species taxids
               </Typography>
               {topKingdoms.map((item) => (
                 <Box
@@ -842,7 +828,7 @@ export default function MetadataStats() {
                 variant="h6"
                 sx={{ mb: 2, fontWeight: 500, fontSize: VIZ_MUI_FONT.cardTitle }}
               >
-                Top 5 genera by assemblies
+                Top 5 genera by species taxids
               </Typography>
               {topGenus.map((item) => (
                 <Box
@@ -883,7 +869,7 @@ export default function MetadataStats() {
                 variant="h6"
                 sx={{ mb: 2, fontWeight: 500, fontSize: VIZ_MUI_FONT.cardTitle }}
               >
-                Assembly levels (assembly counts)
+                Assembly levels (counts)
               </Typography>
               {assemblyLevels.map((item) => (
                 <Box

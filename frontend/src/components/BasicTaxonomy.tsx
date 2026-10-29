@@ -47,6 +47,9 @@ export default function BasicTaxonomy({ superkingdom, value, onChange }: Props) 
     fetchDistinct('kingdom', { superkingdom })
       .then((data) => setOpts(o => ({ ...o, kingdom: data, phylum: [], class: [], order: [] })))
       .finally(() => setLoading(null));
+    // Runs only when the superkingdom changes; adding onChange (a new function on every
+    // parent render) would clear the lower ranks on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [superkingdom]);
 
   useEffect(() => {

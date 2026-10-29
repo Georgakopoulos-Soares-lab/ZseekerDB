@@ -1,5 +1,5 @@
 // src/pages/About.tsx
-import { FC } from 'react';
+import type { FC } from 'react';
 import {
   Box,
   Typography,
@@ -8,7 +8,6 @@ import {
   Stack,
   Link as MuiLink,
   Divider,
-  useTheme
 } from '@mui/material';
 
 // Reusable Card component
@@ -54,7 +53,6 @@ const PersonCard: FC<{
 );
 
 const AboutDoc: FC = () => {
-  const theme = useTheme();
   const year = new Date().getFullYear();
 
   return (
@@ -78,17 +76,17 @@ const AboutDoc: FC = () => {
       </Stack>
 
       <Grid container spacing={3}>
-        <Grid item xs={12}>
+        <Grid>
           <Card>
             <Typography sx={{ color: 'text.secondary' }}>
-              ZSeekerDB is an open, cross-species resource for discovering and comparing candidate Z-DNA and Z-RNA loci
+              ZSeekerDB is an open, cross-species resource for discovering and comparing candidate Z-DNA loci
               across organismal genomes. It combines the ZSeeker prediction framework with a versioned, analysis-oriented
               backend and a modern web interface to support rigorous, reproducible analyses.
             </Typography>
           </Card>
         </Grid>
 
-        <Grid item xs={12}>
+        <Grid>
           <Card title="Mission">
             <Typography color="text.secondary">
               Our mission is to make high-quality Z-form annotations broadly accessible to researchers in genomics,
@@ -98,42 +96,42 @@ const AboutDoc: FC = () => {
           </Card>
         </Grid>
 
-        <Grid item xs={12}>
+        <Grid>
           <Card title="Team">
             <Grid container spacing={3}>
-              <Grid item xs={12} sm={6} md={4}>
+              <Grid>
                 <PersonCard
                   name="Ilias Georgakopoulos-Soares"
                   role="Project lead"
                   email="ilias@austin.utexas.edu"
                 />
               </Grid>
-              <Grid item xs={12} sm={6} md={4}>
+              <Grid>
                 <PersonCard
                   name="Karen M. Vasquez"
                   role="Co-principal investigator"
                   email="karen.vasquez@austin.utexas.edu"
                 />
               </Grid>
-              <Grid item xs={12} sm={6} md={4}>
+              <Grid>
                 <PersonCard
                   name="Spyros Zaranikas"
                   role="Full-stack development, data engineering"
                   email="s.zaranikas@gmail.com"
                 />
               </Grid>
-              <Grid item xs={12} sm={6} md={4}>
+              <Grid>
                 <PersonCard
                   name="George Megalovasilis"
-                  role="Data curator, bioinformatics"
-                  email="gm35588@my.utexas.edu"
+                  role="Data curator, Database design, Bioinformatics"
+                  email="georgios.megalovasilis@austin.utexas.edu"
                 />
               </Grid>
             </Grid>
           </Card>
         </Grid>
 
-        <Grid item xs={12} md={6}>
+        <Grid>
           <Card title="Affiliation">
             <Typography color="text.secondary">
               Division of Pharmacology and Toxicology, College of Pharmacy, The University of Texas at Austin,
@@ -142,7 +140,7 @@ const AboutDoc: FC = () => {
           </Card>
         </Grid>
 
-        <Grid item xs={12} md={6}>
+        <Grid>
           <Card title="Contact">
             <Typography>
               General inquiries: <MuiLink href="mailto:ilias@austin.utexas.edu">ilias@austin.utexas.edu</MuiLink><br />
@@ -151,7 +149,7 @@ const AboutDoc: FC = () => {
           </Card>
         </Grid>
 
-        <Grid item xs={12}>
+        <Grid>
           <Card title="Funding & Acknowledgements">
             <Typography color="text.secondary">
               ZSeekerDB development is supported by NIGMS/NIH (R35GM155468) and internal institutional sources. 

@@ -16,7 +16,7 @@ import MenuIcon from '@mui/icons-material/Menu';
 import DarkModeIcon from '@mui/icons-material/DarkMode';
 import LightModeIcon from '@mui/icons-material/LightMode';
 import Brand from '../components/Brand';
-import { useColorMode } from '../ThemeModeProvider';
+import { useColorMode } from '../colorMode';
 
 const drawerWidth = 240;
 
@@ -24,14 +24,12 @@ const items = [
   { to: '/explore', label: 'Sequence search', icon: <TableViewIcon /> },
   { to: '/metadata', label: 'Species browser', icon: <DnsIcon /> },
   { to: '/MetadataStats', label: 'Species insights', icon: <AnalyticsIcon /> },
-  { to: '/additional-tools', label: 'Additional tools', icon: <SearchIcon /> },
+  { to: '/additional-tools', label: 'ZSeeker tool', icon: <SearchIcon /> },
   { to: '/help', label: 'Help', icon: <HelpIcon /> },
   { to: '/about', label: 'About', icon: <AboutIcon /> },
   { to: '/privacy', label: 'Privacy', icon: <PrivacyIcon /> },
   { to: '/download', label: 'Download', icon: <DownloadIcon /> },
 ];
-
-//{ to: '/data-stats', label: 'Insights', icon: <AnalyticsIcon /> },
 
 export default function AppShell() {
   const [mobileOpen, setMobileOpen] = React.useState(false);
@@ -70,12 +68,10 @@ export default function AppShell() {
             <MenuIcon />
           </IconButton>
 
-          {/* Brand αριστερά */}
           <Box sx={{ flexGrow: 1, display: 'flex', alignItems: 'center' }}>
             <Brand />
           </Box>
 
-          {/* Theme toggle δεξιά */}
           <Tooltip title={mode === 'light' ? 'Switch to dark' : 'Switch to light'}>
             <IconButton color="primary" onClick={toggle}>
               {mode === 'light' ? <DarkModeIcon /> : <LightModeIcon />}

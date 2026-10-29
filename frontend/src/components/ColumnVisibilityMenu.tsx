@@ -1,7 +1,7 @@
 import { Checkbox, FormControlLabel, IconButton, Menu, MenuItem } from '@mui/material';
 import ViewColumnIcon from '@mui/icons-material/ViewColumn';
 import { useMemo, useState } from 'react';
-import { METADATA_COLUMNS } from './DataTable';
+import { METADATA_COLUMNS } from '../utils/metadataColumns';
 
 type Props = {
   columns: string[];

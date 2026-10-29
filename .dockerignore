@@ -8,7 +8,6 @@
 *.duckdb.tmp
 bin/
 data/
+!data/metadata.tsv.gz
 import_log.txt
 imported_metadata.csv
-allfiles.txt
-README_apply_patch.md

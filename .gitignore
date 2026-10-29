@@ -17,3 +17,6 @@ __pycache__/
 .vscode/
 .git_old/
 
+
+# Uncompressed metadata is >100 MB (GitHub limit); the repo tracks data/metadata.tsv.gz.
+/data/metadata.tsv

@@ -14,15 +14,14 @@ import {
 
 import DownloadIcon from '@mui/icons-material/Download';
 
-// Βάση για όλα τα downloads (μπορείς να την αλλάξεις αν χρειαστεί)
 const BASE_DOWNLOAD_URL = 'https://zenodo.org/api/records/17859302/draft/files/';
 
 type Format = 'csv' | 'json' | 'parquet' | 'bed';
 interface DatasetDownload {
   format: Format;
-  label: string;    // Π.χ. "CSV"
-  filename: string; // Π.χ. "zseeker_csv.tar.gz"
-  url: string;      // Πλήρες download URL
+  label: string;
+  filename: string;
+  url: string;
 }
 
 interface Superkingdom {
@@ -41,7 +40,6 @@ const zseeker_json_file = `zseeker_json.tar.gz`
 const zseeker_parquet_file = `zseeker_parquet.tar.gz`
 const zseeker_bed_file = `zseekerdb_bed.tar.gz`
 
-// 🔹 Ρητή δήλωση για τα full-dataset αρχεία
 
 const FULL_DATASET_DOWNLOADS: DatasetDownload[] = [
   {
@@ -106,7 +104,6 @@ const bacteria_bed_file = `bacteria_BED.tar.gz`
 const eukaryota_bed_file = `eukaryota_BED.tar.gz`
 const viruses_bed_file = `viruses_BED.tar.gz`
 
-// 🔹 Ρητή δήλωση για κάθε superkingdom *και* κάθε format
 const SUPERKINGDOMS: Superkingdom[] = [
   {
     id: 'archaea',
@@ -144,7 +141,7 @@ const SUPERKINGDOMS: Superkingdom[] = [
     id: 'bacteria',
     label: 'Bacteria',
     description:
-      'Genome-wide Z-DNA/Z-RNA candidates for bacterial model organisms and pathogens.',
+      'Genome-wide Z-DNA candidates for bacterial model organisms and pathogens.',
     downloads: [
       {
         format: 'csv',
@@ -238,7 +235,6 @@ const SUPERKINGDOMS: Superkingdom[] = [
   },
 ];
 
-// Reusable Card component (όπως στο About)
 const Card: FC<{ title?: string; children: ReactNode }> = ({
   title,
   children,
@@ -306,7 +302,7 @@ const DownloadDataset: FC = () => {
           <Card>
             <Typography sx={{ color: 'text.secondary' }}>
               ZSeekerDB provides pre-packaged, versioned datasets of predicted
-              Z-DNA and Z-RNA loci, stratified by superkingdom and offered in
+              Z-DNA loci, stratified by superkingdom and offered in
               multiple formats. Use the options below to download either the
               entire dataset or specific superkingdom subsets.
             </Typography>

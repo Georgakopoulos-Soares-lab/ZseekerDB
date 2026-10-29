@@ -1,12 +1,12 @@
 /**
- * Keep the treemap artwork inside the ECharts canvas. The bottom inset also
- * reserves space for the breadcrumb so it cannot cover the lowest tiles.
+ * Keep the treemap artwork inside the ECharts canvas. The breadcrumb is drawn
+ * below the chart (not by ECharts), so no extra bottom space is reserved.
  */
 export const TREEMAP_SERIES_BOUNDS = {
   left: 8,
   right: 8,
   top: 8,
-  bottom: 44,
+  bottom: 8,
 } as const;
 
 /**

@@ -5,7 +5,6 @@ import {
   Typography,
   Paper,
   Stack,
-  Link as MuiLink,
   Divider,
   Button,
   List,
@@ -51,7 +50,7 @@ const AddtionalTools: FC = () => {
         sx={{ mb: 3 }}
       >
         <Typography variant="h5" fontWeight={700}>
-          ZSeeker – Additional Tool
+          ZSeeker
         </Typography>
 
       </Stack>
