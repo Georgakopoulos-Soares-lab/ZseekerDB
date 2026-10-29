@@ -9,13 +9,13 @@ as one Railway service.
 
 ### Database design and data pipelines
 
-ZSeekerDB organizes Z-DNA/Z-RNA predictions and associated genomic metadata using DuckDB, an embedded analytical database management system. Prediction records are linked to their corresponding genome assemblies through stable assembly accession identifiers, enabling integrated queries across genomic sequences, assemblies, and taxonomic groups.
+ZSeekerDB organizes Z-DNA predictions and associated genomic metadata using DuckDB, an embedded analytical database management system. Prediction records are linked to their corresponding genome assemblies through stable assembly accession identifiers, enabling integrated queries across genomic sequences, assemblies, and taxonomic groups.
 
 The metadata schema includes:
 
 - **Taxonomic information:** superkingdom, kingdom, phylum, class, order, family, genus, species, and NCBI taxonomy identifiers.
 - **Assembly characteristics:** genome size, G+C content, assembly-level information, and other assembly-associated attributes.
-- **Z-DNA/Z-RNA information:** prediction records and associated summary statistics, including density metrics.
+- **Z-DNA information:** prediction records and associated summary statistics, including density metrics.
 
 Predefined SQL views support common joins and facilitate sequence-, assembly-, and species-level queries. The application uses a DuckDB database file as its primary analytical data source, together with the supplementary metadata file described in the deployment documentation below.
 
@@ -28,7 +28,7 @@ The backend is implemented in Go using the Gin Web Framework (v1.10). DuckDB is 
 The backend exposes REST API endpoints supporting:
 
 - Retrieval and filtering of genomic and taxonomic metadata.
-- Assembly-specific Z-DNA/Z-RNA prediction searches.
+- Assembly-specific Z-DNA prediction searches.
 - Computation and retrieval of summary statistics and visualizations.
 - Export of selected datasets in supported formats.
 - Execution of validated, read-only SQL queries.
