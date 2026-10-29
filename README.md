@@ -4,6 +4,101 @@ ZSeekerDB is a single-container React and Go/DuckDB application. The Docker
 image builds the frontend and serves it from the Go API, so it can be deployed
 as one Railway service.
 
+
+## Database architecture and implementation
+
+### Database design and data pipelines
+
+ZSeekerDB organizes Z-DNA/Z-RNA predictions and associated genomic metadata using DuckDB, an embedded analytical database management system. Prediction records are linked to their corresponding genome assemblies through stable assembly accession identifiers, enabling integrated queries across genomic sequences, assemblies, and taxonomic groups.
+
+The metadata schema includes:
+
+- **Taxonomic information:** superkingdom, kingdom, phylum, class, order, family, genus, species, and NCBI taxonomy identifiers.
+- **Assembly characteristics:** genome size, G+C content, assembly-level information, and other assembly-associated attributes.
+- **Z-DNA/Z-RNA information:** prediction records and associated summary statistics, including density metrics.
+
+Predefined SQL views support common joins and facilitate sequence-, assembly-, and species-level queries. The application uses a DuckDB database file as its primary analytical data source, together with the supplementary metadata file described in the deployment documentation below.
+
+The database is designed to support interactive exploration of genomic predictions and metadata, while versioned dataset archives provide access for larger-scale computational analyses.
+
+### Backend architecture and data access
+
+The backend is implemented in Go using the Gin Web Framework (v1.10). DuckDB is integrated through the `go-duckdb` driver to provide in-process analytical querying of genomic datasets.
+
+The backend exposes REST API endpoints supporting:
+
+- Retrieval and filtering of genomic and taxonomic metadata.
+- Assembly-specific Z-DNA/Z-RNA prediction searches.
+- Computation and retrieval of summary statistics and visualizations.
+- Export of selected datasets in supported formats.
+- Execution of validated, read-only SQL queries.
+
+The application accesses its analytical data through DuckDB and uses predefined SQL views to support common database operations.
+
+#### SQL query restrictions and safeguards
+
+The public SQL API (`GET|POST /api/sql`) is restricted to a single validated, read-only query per request. Queries are checked using DuckDB's SQL parser.
+
+The endpoint rejects write operations, data-definition commands, and multiple SQL statements. Prohibited operations include:
+
+- Data modification: `INSERT`, `UPDATE`, `DELETE`.
+- Schema modification: `CREATE`, `DROP`, `ALTER`.
+- File and database access: `ATTACH`, `COPY`, `EXPORT`.
+- Extension management: `INSTALL`, `LOAD`.
+- Configuration operations: `PRAGMA`.
+
+The backend also restricts database file and network access during query execution. This limits the ability of user-submitted SQL to access server-side resources or modify database configuration.
+
+Application-level safeguards include restrictions on query length, execution time, returned row counts, and request frequency. Queries exceeding the configured result limits are truncated or rejected according to the applicable endpoint restrictions.
+
+Users requiring complete datasets or large-scale analyses are directed to the versioned downloadable dataset archives rather than the interactive query interface.
+
+For the endpoint definitions and configuration details, see [API endpoints](#api-endpoints).
+
+### Frontend and web-interface implementation
+
+The frontend is implemented in React (v19.1.0) using TypeScript (v5.8.3), providing a web-based environment for genomic data exploration.
+
+The interface integrates database-backed queries with interactive tables and graphical visualizations, allowing users to explore Z-DNA/Z-RNA predictions and associated genomic metadata across assemblies and taxonomic groups.
+
+The principal frontend technologies are:
+
+| Component | Technology | Version | Purpose |
+|---|---|---|---|
+| Frontend framework | React | 19.1.0 | Component-based web interface |
+| UI component library | Material UI | 7.1.0 | Interface components and layout |
+| Visualization library | Apache ECharts | 5.6.0 | Interactive genomic data visualizations |
+| React visualization integration | ECharts-for-React | 3.0.2 | Integration of ECharts with React |
+| Build system | Vite | 6.3.5 | Frontend compilation and production builds |
+| Programming language | TypeScript | 5.8.3 | Statically typed frontend development |
+| Backend framework | Gin Web Framework | 1.10 | REST API implementation |
+| Analytical database | DuckDB | Release-compatible version | Embedded analytical query processing |
+| Database driver | go-duckdb | See dependency manifest | Go integration with DuckDB |
+
+Vite is distributed under the MIT License, and TypeScript under the Apache License 2.0 License.
+
+The frontend is compiled during the Docker image build process and served by the Go backend, enabling deployment as a single application container.
+
+### Data visualization and export
+
+The web interface supports interactive exploration of taxonomic and genomic metadata, including assembly-level searches, filtered metadata tables, summary statistics, and graphical visualizations.
+
+Apache ECharts is used to render interactive plots, while the backend provides API endpoints for retrieving the corresponding analytical data.
+
+Metadata exports support CSV, TSV, JSON, XML, and XLS formats. Export functionality is implemented through dedicated API endpoints, allowing users to retrieve selected data for downstream processing.
+
+For computational analyses requiring complete prediction datasets beyond the limits of interactive queries, users should use the downloadable release archives.
+
+### Deployment and reproducibility
+
+ZSeekerDB is distributed as a containerized React and Go application with DuckDB as its analytical database engine.
+
+The Docker image builds the frontend and serves the resulting application through the Go backend. The deployment requires a compatible DuckDB release database and the associated metadata resource.
+
+Deployment configuration, database migration procedures, environment variables, API endpoints, and release-switching instructions are documented in the sections below.
+
+For reproducibility, the exact dependency versions and compatible database format should be determined from the repository's dependency manifests, lockfiles, and release-specific deployment configuration.
+
 ## Railway deployment
 
 1. In Railway, create a **GitHub Repo** service from this repository and select
@@ -54,9 +149,10 @@ Used by the React UI:
 - `GET /api/metadata/list`, `/api/metadata/export`, `/api/metadata/charts`, `/api/metadata/distinct` →
   Species browser table, downloads (csv/tsv/json/xml/xls), charts and filter options; all take the same
   taxonomy/range filter parameters
-- `GET|POST /api/sql` → runs **one SELECT statement** (validated with DuckDB's parser; anything else,
-  including several statements, is rejected). After startup the engine's file/network access is switched
-  off and the configuration locked, so queries cannot read server files or undo this.
+- `GET|POST /api/sql` → executes a single validated, read-only
+  SELECT query. DuckDB's SQL parser rejects prohibited operations
+  and multiple statements. Database file/network access is disabled
+  after initialization, and the configuration is locked.
 
 Other routes:
 - `GET /api/health`
