@@ -1,6 +1,5 @@
-import type { ReactNode } from 'react';
 // src/pages/HelpDocs.tsx
-import { useMemo, useState, useRef, useEffect } from 'react';
+import { useMemo, useState, useRef, useEffect, type ReactElement } from 'react';
 import {
   Box,
   Container,
@@ -18,7 +17,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 type Section = {
   id: string;
   title: string;
-  body: ReactNode;
+  body: ReactElement;
   defaultExpanded?: boolean;
 };
 
@@ -75,12 +74,23 @@ export default function HelpDocs() {
           <>
             <Typography paragraph>
               The taxonomic treemap is <b>interactive</b>: click a rectangle to drill down
-              (<i>Superkingdom → Kingdom → Phylum → Species</i>). Use the breadcrumb to navigate
-              back. Colors use a blue palette and labels are white for high contrast.
+              one available rank at a time (<i>Superkingdom → Kingdom → Phylum → Class → Order
+              → Family → Genus → Species</i>). Viral lineages also include <i>Viral realm</i>.
+              Missing ranks are shown as explicit <i>Unclassified …</i> nodes. Use the complete
+              breadcrumb path to navigate back; each tooltip identifies the node rank and reports
+              assembly and unique species-taxid counts separately.
             </Typography>
             <Typography variant="body2" color="text.secondary">
               Tip: For very large categories, the treemap shows only the <b>Top‑30</b> nodes per
               level so it remains readable.
+            </Typography>
+            <Typography paragraph sx={{ mt: 2 }}>
+              Group-level Z-DNA density, genome size and GC summaries use a two-stage
+              taxid-balanced mean. Assembly values are first averaged within each species
+              taxonomy identifier (NCBI species taxid); those per-taxid means are then averaged
+              within the displayed taxonomic group. Each unique species taxid therefore
+              contributes equally, regardless of its assembly or strain count. Assemblies with
+              no predictions count with a density of 0.
             </Typography>
           </>
         ),
@@ -91,8 +101,9 @@ export default function HelpDocs() {
         body: (
           <>
             <Typography paragraph>
-              Start typing in the <b>Specie</b> field. Suggestions come from the
-              <code> tax_names</code> table or (fallback) from <code>metadata</code>. After
+              Start typing in the <b>Specie</b> field. Suggestions include every species in the
+              release metadata, including species whose assemblies have no predicted Z-DNA (the
+              results table then reports 0 Z-DNA predictions). After
               selecting a species, the <b>Chromosome</b> field is limited to chromosomes available
               in assemblies for that species.
             </Typography>
@@ -129,34 +140,41 @@ export default function HelpDocs() {
             <Typography paragraph>
               Use the <b>Export</b> menu to download the current query results as CSV, TSV, JSON,
               XML or Excel (HTML). For very large datasets, export in batches or consider
-              server‑side export. Coordinates in result tables and CSV, TSV, JSON, XML and Excel exports use zero-based starts and inclusive ends (length = End − Start + 1). BED archives require half-open ends (End + 1).
+              server‑side export.
             </Typography>
           </>
         ),
       },
       {
         id: 'viz-tab',
-        title: 'Visualizations Tab (Histogram / Density / Scatter / Box / k‑mers)',
+        title: 'Visualizations Tab',
         body: (
           <>
+            <Typography paragraph>
+              The tab shows six panels. With a chromosome selected (or for genomes with a single
+              chromosome/contig) they describe that chromosome; otherwise they are genome‑wide.
+            </Typography>
             <ul style={{ marginLeft: 16 }}>
               <li>
-                <b>Histogram:</b> Distribution of Z‑DNA Score (bins of 10).
+                <b>Z‑DNA counts:</b> number of predicted Z‑DNA sites in 10 equal bins along the
+                chromosome, or one bar per chromosome genome‑wide.
               </li>
               <li>
-                <b>Predicted loci by position:</b> For a selected chromosome, counts loci by their zero-based start in ten equal-width windows. The displayed extent ends at the last predicted base. Genome-wide, shows counts per chromosome. These are locus counts, not base-pair densities.
+                <b>Z‑DNA Score counts / Length counts:</b> histograms of scores (bins of 10) and
+                lengths (bins of 10 bp from the 9 bp minimum).
               </li>
               <li>
-                <b>Start vs Score (scatter):</b> Sampled points (e.g., 20k) for speed.
+                <b>Z‑DNA Score / Length distribution:</b> each prediction by genomic position (Mb)
+                for one chromosome (sampled); genome‑wide, the median per chromosome, with
+                min/quartiles/max on hover.
               </li>
               <li>
-                <b>Box plot per chromosome:</b> Compare score distributions across chromosomes (Top
-                15 by median).
-              </li>
-              <li>
-                <b>Top central 8‑mers:</b> Most frequent 8‑mers around the center of each sequence.
+                <b>Length vs Score:</b> a deterministic sample of up to 20,000 predictions.
               </li>
             </ul>
+            <Typography variant="body2" color="text.secondary">
+              Genome‑wide panels show every chromosome up to 25; beyond that, the 12 with the most and the 12 with the fewest predictions, separated by a “…” bin.
+            </Typography>
           </>
         ),
       },
