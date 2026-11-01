@@ -1,105 +1,151 @@
-"""Build complete assembly metadata and the prediction-bearing browser subset.
+"""Shared build steps for the Oct-2026 release: metadata mapping, derived tables, views.
 
-Does not scan or rewrite the prediction table. Supports both supplied TSV naming
-schemes; missing required fields or duplicate accessions fail before replacement.
+Used by both rebuild_release.py (from the July DB) and build_meta_stats.py (from scratch),
+so the two paths produce the same objects.
+
+metadata keeps the column names the backend/frontend already query (taxid, assembly_level,
+obs_*, is_t2t, ...). bioproject/biosample are dropped: the new TSV has no source for them and
+nothing in the app reads them. New TSV fields are appended after the legacy columns.
 """
-from pathlib import Path
+import glob
+import os
+import re
+
+from common import ACCESSION_RE, CSV_DIR
+
+# Assemblies whose metadata says they have no predictions are dropped when this is set.
+DROP_EMPTY = os.environ.get("MIG_DROP_EMPTY_ASSEMBLIES", "1") == "1"
 
 
-def build_metadata(con, tsv, drop_empty=True):
-    path = str(Path(tsv).resolve()).replace("'", "''")
-    con.execute(f"CREATE OR REPLACE TEMP VIEW _release_source AS SELECT * FROM read_csv('{path}', delim='\t', header=true, all_varchar=true)")
-    cols = {r[0] for r in con.execute('DESCRIBE _release_source').fetchall()}
-
-    def column(*names):
-        for name in names:
-            if name in cols:
-                return 'm."' + name.replace('"', '""') + '"'
-        raise ValueError(f"Metadata missing required field: {' or '.join(names)}")
-
-    def text(*names):
-        return f"NULLIF({column(*names)}, '')"
-
-    def number(kind, *names):
-        return f"TRY_CAST({text(*names)} AS {kind})"
-
-    mappings = {
-        'assembly': text('assembly'),
-        'bioproject': "CAST(NULL AS VARCHAR)",
-        'biosample': "CAST(NULL AS VARCHAR)",
-        'taxid': number('BIGINT', 'ncbi_summary_taxid', 'ncbi_taxid'),
-        'assembly_level': f"CASE lower({text('resolve_level')}) WHEN 'complete' THEN 'Complete Genome' WHEN 'chromosome' THEN 'Chromosome' ELSE {text('resolve_level')} END",
-        'genome_size': number('BIGINT', 'genome_size'),
-        'gc_percent': number('DOUBLE', 'gc_percent'),
-        **{name: text(name) for name in ['superkingdom', 'kingdom', 'phylum', 'class', 'order', 'family', 'genus', 'tax_name']},
-        'is_t2t': 'COALESCE(z.is_t2t, ' + ('TRY_CAST(m.is_t2t AS BOOLEAN), ' if 'is_t2t' in cols else '') + 'false)',
-        'viral_realm': text('viral_realm'),
-        'updated_tax_name': text('updated_tax_name'),
-        'obs_zbp': number('BIGINT', 'Z-DNA/-RNA bases count'),
-        'obs_density_per_kb': number('DOUBLE', 'Z-DNA/-RNA density per kb'),
-        'obs_n_zdna': number('BIGINT', 'Z-DNA/-RNA predictions count'),
-        'species_taxid': number('BIGINT', 'ncbi_summary_species_taxid', 'ncbi_species_taxid'),
-    }
-    n, distinct, missing = con.execute('SELECT COUNT(*), COUNT(DISTINCT assembly), COUNT(*) FILTER (WHERE assembly IS NULL OR trim(assembly)=\'\') FROM _release_source').fetchone()
-    if not n or distinct != n or missing:
-        raise ValueError(f"Metadata must have one nonempty accession per row: rows={n}, distinct={distinct}, missing={missing}")
-    has_map = con.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='_asm_t2t'").fetchone()[0]
-    if not has_map:
-        con.execute('CREATE TEMP TABLE _asm_t2t (assembly VARCHAR, is_t2t BOOLEAN)')
-        # A metadata-only refresh retains known filename-derived T2T flags.
-        has_metadata = con.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='metadata'").fetchone()[0]
-        if has_metadata:
-            con.execute('INSERT INTO _asm_t2t SELECT assembly, is_t2t FROM metadata')
-    projection = ',\n'.join(f'{value} AS "{key}"' for key, value in mappings.items())
-    con.execute('BEGIN')
-    try:
-        con.execute(f'CREATE OR REPLACE TABLE metadata_all AS SELECT {projection} FROM _release_source m LEFT JOIN _asm_t2t z ON z.assembly=m.assembly')
-        con.execute('CREATE OR REPLACE TABLE metadata AS SELECT * EXCLUDE (species_taxid) FROM metadata_all' + (' WHERE obs_n_zdna > 0' if drop_empty else ''))
-        con.execute('COMMIT')
-    except Exception:
-        con.execute('ROLLBACK')
-        raise
-    return n
+def _q(s):
+    return "'" + s.replace("'", "''") + "'"
 
 
-def recompute_observed(con, drop_empty=True):
-    """Replace stale TSV prediction summaries using the validated prediction table.
-
-    This scans data once. Genome-size attributes are unchanged; density uses
-    the documented genome_size denominator, in bp, rather than fitting a target.
-    """
-    con.execute('CREATE OR REPLACE TEMP TABLE _observed AS SELECT assembly, COUNT(*)::BIGINT AS n, SUM(length("Sequence"))::BIGINT AS zbp, SUM("Z-DNA Score") AS score_sum, MIN("Z-DNA Score") AS score_min, MAX("Z-DNA Score") AS score_max FROM data GROUP BY assembly')
-    missing = con.execute('SELECT COUNT(*) FROM _observed o LEFT JOIN metadata_all m USING (assembly) WHERE m.assembly IS NULL').fetchone()[0]
-    if missing:
-        raise ValueError(f'{missing} prediction-bearing assemblies lack metadata')
-    con.execute('BEGIN')
-    try:
-        con.execute('''CREATE OR REPLACE TABLE metadata_all AS
-          SELECT m.* EXCLUDE (obs_zbp, obs_density_per_kb, obs_n_zdna),
-                 COALESCE(o.zbp, 0)::BIGINT AS obs_zbp,
-                 CASE WHEN m.genome_size > 0 THEN COALESCE(o.zbp, 0)::DOUBLE * 1000 / m.genome_size ELSE NULL END AS obs_density_per_kb,
-                 COALESCE(o.n, 0)::BIGINT AS obs_n_zdna
-          FROM metadata_all m LEFT JOIN _observed o USING (assembly)''')
-        # Restore the canonical field order after replacing the summary values.
-        con.execute('CREATE OR REPLACE TABLE metadata_all AS SELECT * EXCLUDE (species_taxid), species_taxid FROM metadata_all')
-        con.execute('CREATE OR REPLACE TABLE metadata AS SELECT * EXCLUDE (species_taxid) FROM metadata_all' + (' WHERE obs_n_zdna > 0' if drop_empty else ''))
-        con.execute('COMMIT')
-    except Exception:
-        con.execute('ROLLBACK')
-        raise
+def build_t2t_table(con, log):
+    """_asm_t2t(assembly, is_t2t): True if any source CSV filename for the assembly contains 'T2T'."""
+    rx = re.compile(ACCESSION_RE)
+    t2t = {}
+    for p in glob.iglob(os.path.join(CSV_DIR, "*.zseeker.csv")):
+        base = os.path.basename(p)
+        m = rx.match(base)
+        if m:
+            a = m.group(1)
+            t2t[a] = t2t.get(a, False) or "T2T" in base.upper()
+    assert t2t, f"no *.zseeker.csv files found in {CSV_DIR}"
+    con.execute("CREATE OR REPLACE TEMP TABLE _asm_t2t (assembly VARCHAR, is_t2t BOOLEAN)")
+    con.executemany("INSERT INTO _asm_t2t VALUES (?, ?)", list(t2t.items()))
+    log(f"_asm_t2t: {len(t2t)} assemblies, {sum(t2t.values())} flagged T2T")
 
 
-def main():
-    import os
-    from common import connect, META_TSV
-    con = connect()
-    try:
-        print(f"metadata_all: {build_metadata(con, META_TSV, os.environ.get('MIG_DROP_EMPTY_ASSEMBLIES', '1') == '1'):,} assemblies")
-        if os.environ.get('MIG_RECOMPUTE_OBSERVED', '0') == '1':
-            recompute_observed(con, os.environ.get('MIG_DROP_EMPTY_ASSEMBLIES', '1') == '1')
-    finally:
-        con.close()
+def build_metadata(con, meta_tsv, log):
+    """metadata from the Oct-2026 TSV. Requires _asm_t2t (build_t2t_table)."""
+    t = lambda c: f"nullif(m.{c},'')"
+    na = lambda c: f"nullif(nullif(m.{c},''),'na')"
+    big = lambda c: f"TRY_CAST(m.{c} AS BIGINT)"
+    where = "WHERE TRY_CAST(m.z_predictions_count AS BIGINT) > 0" if DROP_EMPTY else ""
+    con.execute(f"""
+    CREATE OR REPLACE TABLE metadata AS
+    SELECT
+        m.assembly_accession                      AS assembly,
+        {big('ncbi_summary_taxid')}               AS taxid,
+        -- old DB carried NCBI assembly_level values; the TSV's resolve_level uses lowercase codes
+        CASE m.resolve_level WHEN 'complete' THEN 'Complete Genome'
+                             WHEN 'chromosome' THEN 'Chromosome'
+                             ELSE {t('resolve_level')} END AS assembly_level,
+        {big('genome_size')}                      AS genome_size,
+        TRY_CAST(m.gc_percent AS DOUBLE)          AS gc_percent,
+        {t('superkingdom')}                       AS superkingdom,
+        {t('kingdom')}                            AS kingdom,
+        {t('phylum')}                             AS phylum,
+        {t('class')}                              AS class,
+        {t('"order"')}                            AS "order",
+        {t('family')}                             AS family,
+        {t('genus')}                              AS genus,
+        {t('tax_name')}                           AS tax_name,
+        COALESCE(z.is_t2t, false)                 AS is_t2t,
+        {t('viral_realm')}                        AS viral_realm,
+        {t('updated_tax_name')}                   AS updated_tax_name,
+        {big('total_z_bases')}                    AS obs_zbp,
+        -- TSV z_density is a fraction (total_z_bases / genome_size_manual); app shows per kb
+        TRY_CAST(m.z_density AS DOUBLE) * 1000    AS obs_density_per_kb,
+        {big('z_predictions_count')}              AS obs_n_zdna,
+        {big('ncbi_summary_species_taxid')}       AS species_taxid,
+        {t('organism_name')}                      AS organism_name,
+        {t('species')}                            AS species,
+        {na('infraspecific_name')}                AS infraspecific_name,
+        {big('genome_size_ungapped')}             AS genome_size_ungapped,
+        {big('genome_size_manual')}               AS genome_size_manual,
+        {big('replicon_count')}                   AS replicon_count,
+        {big('scaffold_count')}                   AS scaffold_count,
+        {big('contig_count')}                     AS contig_count,
+        TRY_CAST(m.reference_genome AS BOOLEAN)   AS reference_genome,
+        TRY_CAST(m.has_gff AS BOOLEAN)            AS has_gff,
+        {na('paired_asm_comp')}                   AS paired_asm_comp
+    FROM read_csv({_q(meta_tsv)}, delim='\t', header=true, all_varchar=true) m
+    LEFT JOIN _asm_t2t z ON z.assembly = m.assembly_accession
+    {where}
+    ORDER BY m.assembly_accession
+    """)
+    n = con.execute("SELECT COUNT(*) FROM metadata").fetchone()[0]
+    log(f"metadata built: {n:,} rows (drop_empty={DROP_EMPTY})")
 
 
-if __name__ == '__main__':
-    main()
+def build_derived(con, log):
+    """chromosomes, tax_names, data_kpis, data_top_asm, data_top_chrom. `data` holds only real predictions."""
+    # One 29M-group aggregation feeds both chromosomes and data_top_chrom. No ORDER BY: the
+    # frontend sorts at query time, and the sort OOM'd in the July build.
+    con.execute('CREATE OR REPLACE TABLE data_top_chrom AS SELECT "Chromosome" AS k, COUNT(*) AS c FROM data GROUP BY 1')
+    con.execute('CREATE OR REPLACE TABLE chromosomes AS SELECT k AS "Chromosome" FROM data_top_chrom')
+    log("data_top_chrom / chromosomes: %d" % con.execute("SELECT COUNT(*) FROM chromosomes").fetchone()[0])
+
+    con.execute("CREATE OR REPLACE TABLE data_top_asm AS SELECT assembly AS k, COUNT(*) AS c FROM data GROUP BY 1")
+    log("data_top_asm: %d" % con.execute("SELECT COUNT(*) FROM data_top_asm").fetchone()[0])
+
+    # Species pickers only offer species that have predictions.
+    con.execute("""CREATE OR REPLACE TABLE tax_names AS
+        SELECT DISTINCT tax_name FROM metadata WHERE genome_size >= 1000 AND obs_n_zdna > 0""")
+    log("tax_names: %d" % con.execute("SELECT COUNT(*) FROM tax_names").fetchone()[0])
+
+    con.execute("""
+    CREATE OR REPLACE TABLE data_kpis AS
+    SELECT
+        s.total_sites,
+        (SELECT COUNT(*) FROM chromosomes)  AS distinct_chr,
+        s.avg_score, s.min_score, s.max_score, s.avg_seq_len,
+        (SELECT COUNT(*) FROM data_top_asm) AS distinct_asm,
+        now()                               AS computed_at
+    FROM (
+        SELECT COUNT(*)                                 AS total_sites,
+               AVG("Z-DNA Score")                       AS avg_score,
+               CAST(MIN("Z-DNA Score") AS DOUBLE)       AS min_score,
+               CAST(MAX("Z-DNA Score") AS DOUBLE)       AS max_score,
+               AVG(LENGTH("Sequence"))                  AS avg_seq_len
+        FROM data) s
+    """)
+    log("data_kpis: %s" % (con.execute("SELECT * FROM data_kpis").fetchone(),))
+
+
+def build_views(con, log):
+    # zdna exactly as backend/main.go createOrReplaceViews
+    con.execute("""
+    CREATE OR REPLACE VIEW zdna AS
+    SELECT "Chromosome","Start","End","Z-DNA Score","Sequence", assembly AS "Assembly" FROM data
+    """)
+    # Same display names as the old DB's metadata_view (typo 'predicrions' kept for compatibility).
+    con.execute("""
+    CREATE OR REPLACE VIEW metadata_view AS
+    SELECT
+        assembly,
+        is_t2t             AS "T2T",
+        genome_size        AS "Genome size",
+        taxid              AS "Taxon ID",
+        gc_percent         AS "GC content (%)",
+        superkingdom, kingdom, phylum, class, "order", family, genus, tax_name,
+        viral_realm        AS "Viral realm",
+        updated_tax_name   AS "Infraspecific name",
+        obs_zbp            AS "Z-DNA bps",
+        obs_density_per_kb AS "Z-DNA density (per kb)",
+        obs_n_zdna         AS "Number of predicrions"
+    FROM metadata WHERE genome_size >= 1000
+    """)
+    log("views zdna + metadata_view created")
