@@ -59,7 +59,7 @@ For the endpoint definitions and configuration details, see [API endpoints](#api
 
 The frontend is implemented in React (v19.1.0) using TypeScript (v5.8.3), providing a web-based environment for genomic data exploration.
 
-The interface integrates database-backed queries with interactive tables and graphical visualizations, allowing users to explore Z-DNA/Z-RNA predictions and associated genomic metadata across assemblies and taxonomic groups.
+The interface integrates database-backed queries with interactive tables and graphical visualizations, allowing users to explore predicted Z-DNA-forming sequences and associated genomic metadata across assemblies and taxonomic groups.
 
 The principal frontend technologies are:
 
