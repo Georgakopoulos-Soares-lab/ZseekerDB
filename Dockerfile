@@ -4,9 +4,8 @@ WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
-# The existing frontend has legacy TypeScript diagnostics, while Vite can still
-# produce the production bundle used at runtime.
-RUN npx vite build
+# Validate TypeScript before producing the runtime bundle.
+RUN npm run build
 
 # Build the DuckDB-backed Go API. CGO is required by go-duckdb.
 FROM golang:1.24-bookworm AS backend-build

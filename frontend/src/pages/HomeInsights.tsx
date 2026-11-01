@@ -1,8 +1,9 @@
 // src/pages/HomeInsights.tsx
 import { useEffect, useMemo, useState } from 'react';
-import { Box, Grid, Paper, Typography, CircularProgress } from '@mui/material';
+import { Box, GridLegacy as Grid, Paper, Typography, CircularProgress } from '@mui/material';
 import ReactECharts from 'echarts-for-react';
 import { useTheme } from '@mui/material/styles';
+import { shortenKingdom } from '../utils/kingdoms';
 
 const fmtNum = (n: number | null | undefined) =>
   typeof n === 'number' && Number.isFinite(n)
@@ -16,7 +17,7 @@ const fmtInt = (n: number | null | undefined) =>
 
 type KV = { label: string; n: number; superkingdom?: string };
 
-export default function HomeInsights() {
+export default function HomeInsights({ onCounts }: { onCounts?: (assemblies: number, predictions: number) => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState<string | null>(null);
 
@@ -49,6 +50,7 @@ export default function HomeInsights() {
 
         if (dead) return;
         setTotalAssemblies(d.kpis.total_assemblies);
+        onCounts?.(d.kpis.total_assemblies, d.kpis.total_predictions);
         setUniqueTaxids(d.kpis.unique_taxids);
         setAvgGenome(d.kpis.avg_genome_size);
         setAvgGC(d.kpis.avg_gc);
@@ -69,30 +71,7 @@ export default function HomeInsights() {
       }
     })();
     return () => { dead = true; };
-  }, []);
-
-  // ECharts options
-const pieOpt = useMemo(() => ({
-  textStyle: {
-    color: axisLabelColor,
-  },
-  tooltip: {
-    trigger: 'item',
-    formatter: (p: any) => `${p.name}<br/>${fmtNum(p.value)} (${fmtNum(p.percent)}%)`
-  },
-  legend: {
-    bottom: 0,
-    type: 'scroll',
-    textStyle: { color: axisLabelColor }
-  },
-  series: [{
-    type: 'pie',
-    radius: ['50%','70%'],
-    label: { show: false },
-    data: sk.map(d => ({ name: d.label, value: d.n }))
-  }]
-}), [sk, axisLabelColor]);
-
+  }, [onCounts]);
 
   // palette for bars (repeats if more categories than colors)
   const PALETTE = [
@@ -130,9 +109,10 @@ const topKOpt = useMemo(() => ({
     trigger: 'axis',
     formatter: (p: any) => `${p[0]?.name ?? ''}: ${fmtNum(p[0]?.value ?? null)}`
   },
-  grid: { left: 120, right: 20, top: 20, bottom: 20 },
+  grid: { left: 120, right: 20, top: 20, bottom: 55 },
   xAxis: {
-    type: 'value',
+    type: 'value', name: 'Predicted bp / kb', nameLocation: 'middle', nameGap: 30,
+    nameTextStyle: { color: axisNameColor },
     axisLabel: {
       formatter: (v: any) => fmtNum(Number(v)),
       color: axisLabelColor
@@ -143,7 +123,8 @@ const topKOpt = useMemo(() => ({
     inverse: true,
     data: topK.map(d => d.label),
     axisLabel: {
-      color: axisLabelColor
+      color: axisLabelColor,
+      formatter: shortenKingdom
     }
   },
   legend: {
@@ -157,7 +138,7 @@ const topKOpt = useMemo(() => ({
       itemStyle: { color: skColorMap[d.superkingdom ?? '(unknown)'] ?? PALETTE[0] }
     }))
   }]
-}), [topK, skColorMap, axisLabelColor]);
+}), [topK, skColorMap, axisLabelColor, axisNameColor]);
 
 const histOpt = useMemo(() => ({
   textStyle: {
@@ -192,18 +173,8 @@ const histOpt = useMemo(() => ({
     type: 'log',
     logBase: 10,
     min: 1,
-    name: 'Counts (log{sub|10})',
-    nameTextStyle: {
-      color: axisNameColor,   // βασικό text
-      rich: {
-        sub: {
-          color: axisNameColor,
-          fontSize: 7,
-          verticalAlign: 'bottom',
-          padding: [6, 0, 0, 0]
-        }
-      }
-    },
+    name: 'Counts',
+    nameTextStyle: { color: axisNameColor },
     nameLocation: 'middle',
     nameGap: 70,
     axisLabel: {
@@ -233,13 +204,13 @@ const scatterOpt = useMemo(() => {
     tooltip: {
       trigger: 'item',
       formatter: (p: any) =>
-        `Genome size: ${fmtNum(p.value[0])}<br/>GC%: ${fmtNum(p.value[1])}`
+        `${p.seriesName}<br/>Genome size: ${fmtInt(p.value[0])} bp<br/>GC%: ${fmtNum(p.value[1])}`
     },
     grid: { 
       left: 80,    
       right: 20,
       top: 30,
-      bottom: 110,
+      bottom: 80,
       containLabel: true
     },
     xAxis: { 
@@ -259,7 +230,7 @@ const scatterOpt = useMemo(() => {
         }
       },
       nameLocation: 'middle',
-      nameGap: 110,
+      nameGap: 65,
       axisLabel: { 
         formatter: (v: number) => fmtInt(Number(v)), 
         margin: 20,
@@ -279,10 +250,7 @@ const scatterOpt = useMemo(() => {
         color: axisLabelColor
       }
     },
-    legend: {
-      bottom: 0,
-      textStyle: { color: axisLabelColor }
-    },
+    legend: { show: false },
     series: Array.from(bySK.entries())
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([name, pts], idx) => ({
@@ -304,8 +272,7 @@ const skBarOpt = useMemo(() => {
   const categories = sorted.map(s => s.label);
 
   const seriesData = sorted.map((s, i) => ({
-    value: Math.log10((s.n ?? 0) + 1),
-    raw: s.n ?? 0,
+    value: s.n,
     itemStyle: { color: PALETTE2[i % PALETTE2.length] }
   }));
 
@@ -316,7 +283,7 @@ const skBarOpt = useMemo(() => {
     tooltip: {
       trigger: 'item',
       formatter: (p: any) =>
-        `${p.name}<br/>Count: ${p.data.raw}<br/>Normalized (log10): ${fmtNum(Number(p.data.value))}`
+        `${p.name}<br/>Count: ${fmtInt(Number(p.value))}`
     },
     legend: {
       show: true,
@@ -339,34 +306,22 @@ const skBarOpt = useMemo(() => {
       }
     },
     yAxis: {
-      type: 'value',
-      name: 'Counts (log{sub|10})',
-      nameTextStyle: {
-        color: axisNameColor,
-        rich: {
-          sub: {
-            color: axisNameColor,
-            fontSize: 7,
-            verticalAlign: 'bottom',
-            padding: [6, 0, 0, 0]
-          }
-        }
-      },
+      type: 'log', logBase: 10, min: 1,
+      name: 'Counts',
+      nameTextStyle: { color: axisNameColor },
       nameLocation: 'middle',
       nameGap: 40,
       axisLabel: {
-        formatter: (v: any) => fmtNum(Number(v)),
+        formatter: (v: any) => fmtInt(Number(v)),
         color: axisLabelColor
       }
     },
-    series: [
-      {
-        type: 'bar',
-        name: 'Superkingdom',
-        data: seriesData,
-        emphasis: { focus: 'series' }
-      }
-    ]
+    series: sorted.map((s, i) => ({
+      type: 'bar', name: s.label, barGap: '-100%',
+      itemStyle: { color: PALETTE2[i % PALETTE2.length] },
+      data: sorted.map((_, j) => j === i ? seriesData[i] : null),
+      emphasis: { focus: 'series' }
+    }))
   };
 }, [sk, axisLabelColor, axisNameColor]);
 
@@ -394,7 +349,7 @@ const skBarOpt = useMemo(() => {
             </Grid>
             <Grid item xs={12} sm={6} md={3} sx={{minWidth: '23%'}}>
               <Paper sx={{ p: 2 }}>
-                <Typography variant="caption" color="text.secondary">Unique taxids</Typography>
+                <Typography variant="caption" color="text.secondary">Unique species taxids</Typography>
                 <Typography variant="h6" sx={{ mt: .5 }}>
                   {fmtInt(uniqueTaxids)}
                 </Typography>
@@ -403,18 +358,22 @@ const skBarOpt = useMemo(() => {
             <Grid item xs={12} sm={6} md={3} sx={{minWidth: '24%'}}>
               <Paper sx={{ p: 2 }}>
                 <Typography variant="caption" color="text.secondary">Avg. genome size</Typography>
-                <Typography variant="h6" sx={{ mt: .5 }}>{fmtNum(avgGenome)}</Typography>
+                <Typography variant="h6" sx={{ mt: .5 }}>{fmtInt(avgGenome)} bp</Typography>
               </Paper>
             </Grid>
             <Grid item xs={12} sm={6} md={3} sx={{minWidth: '23%'}}>
               <Paper sx={{ p: 2 }}>
                 <Typography variant="caption" color="text.secondary">Avg. %GC</Typography>
-                <Typography variant="h6" sx={{ mt: .5 }}>{fmtNum(avgGC)}</Typography>
+                <Typography variant="h6" sx={{ mt: .5 }}>{fmtNum(avgGC)}%</Typography>
               </Paper>
             </Grid>
           </Grid>
 
-          {/* Charts: 2 ανά σειρά */}
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Counts include all assemblies, including those with no predictions. Genome size, GC and kingdom density
+            are averaged within species taxids, then across species; missing values are omitted per metric.
+          </Typography>
+          {/* Charts */}
           <Grid container spacing={2} sx={{ width: '100%' }}>
             <Grid item xs={12} md={6} sx={{ minWidth: '48%' }}>
               <Paper sx={{ p: 2, height: 380, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -427,7 +386,7 @@ const skBarOpt = useMemo(() => {
 
             <Grid item xs={12} md={6} sx={{ minWidth: '48%' }}>
               <Paper sx={{ p: 2, height: 380, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1 }}>10 Kingdoms with highest Z-DNA/-RNA densities</Typography>
+                <Typography variant="subtitle2" sx={{ mb: 1 }}>Kingdoms with highest Z-DNA / Z-RNA density</Typography>
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <ReactECharts style={{ width: '100%', height: '100%' }} option={topKOpt} />
                 </Box>

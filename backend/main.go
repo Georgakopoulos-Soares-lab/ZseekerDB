@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
@@ -29,14 +30,16 @@ type Config struct {
 	StaticDir string
 	Threads   int
 	// (κρατιούνται για συμβατότητα, δεν χρησιμοποιούνται πλέον)
-	ZdnaParquet   string
-	MetadataGlob  string
-	TempDir       string
-	MaxTempGiB    int
-	MemoryLimitGB int
-	Host          string
-	Port          int
-	CORSOrigins   []string
+	ZdnaParquet    string
+	MetadataGlob   string
+	TempDir        string
+	MaxTempGiB     int
+	MemoryLimitGB  int
+	Host           string
+	Port           int
+	CORSOrigins    []string
+	TrustedProxies []string
+	ReadOnly       bool
 }
 
 func loadConfig() (*Config, error) {
@@ -52,6 +55,7 @@ func loadConfig() (*Config, error) {
 	// with a persistent-volume path such as /data/zdnadatabase.duckdb.
 	cfg.DBPath = get("DUCKDB_PATH", "data/zdnadatabase.duckdb")
 	cfg.StaticDir = get("STATIC_DIR", "frontend/dist")
+	cfg.ReadOnly = get("DUCKDB_READ_ONLY", "0") == "1"
 	cfg.MetadataGlob = get("METADATA_GLOB", "")
 	cfg.TempDir = get("DUCKDB_TEMP_DIR", "data/tmp")
 	if p, err := strconv.Atoi(get("DUCKDB_MAX_TEMP_GIB", "50")); err == nil {
@@ -82,6 +86,11 @@ func loadConfig() (*Config, error) {
 			cfg.CORSOrigins = append(cfg.CORSOrigins, o)
 		}
 	}
+	for _, proxy := range strings.Split(get("TRUSTED_PROXIES", ""), ",") {
+		if proxy = strings.TrimSpace(proxy); proxy != "" {
+			cfg.TrustedProxies = append(cfg.TrustedProxies, proxy)
+		}
+	}
 	return cfg, nil
 }
 
@@ -97,6 +106,9 @@ type Server struct {
 
 func openDuckDB(cfg *Config) (*sql.DB, error) {
 	dsn := fmt.Sprintf("%s?threads=%d", cfg.DBPath, cfg.Threads)
+	if cfg.ReadOnly {
+		dsn += "&access_mode=read_only"
+	}
 	db, err := sql.Open("duckdb", dsn)
 	if err != nil {
 		return nil, err
@@ -112,6 +124,15 @@ func openDuckDB(cfg *Config) (*sql.DB, error) {
 	db.Exec(fmt.Sprintf("PRAGMA temp_directory = '%s'", sqlQuote(td)))
 	db.Exec(fmt.Sprintf("PRAGMA max_temp_directory_size = '%dGB'", cfg.MaxTempGiB))
 	db.Exec(fmt.Sprintf("PRAGMA memory_limit = '%dGB'", cfg.MemoryLimitGB))
+	// External files, network scans and extension loading are unavailable to SQL.
+	if _, err := db.Exec("SET enable_external_access=false"); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec("SET lock_configuration=true"); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
 }
 
@@ -132,6 +153,13 @@ SELECT "Chromosome","Start","End","Z-DNA Score","Sequence", "assembly" AS "Assem
 		return err
 	}
 	return nil
+}
+
+func nullableFloat(v sql.NullFloat64) *float64 {
+	if !v.Valid {
+		return nil
+	}
+	return &v.Float64
 }
 
 // ---------- home insights: single cached endpoint ----------
@@ -192,25 +220,26 @@ func (s *Server) homeInsights(c *gin.Context) {
 		SK string  `json:"sk"`
 	}
 	type KPIs struct {
-		TotalAssemblies int64   `json:"total_assemblies"`
-		UniqueTaxids    int64   `json:"unique_taxids"`
-		AvgGenomeSize   float64 `json:"avg_genome_size"`
-		AvgGC           float64 `json:"avg_gc"`
+		TotalAssemblies  int64    `json:"total_assemblies"`
+		TotalPredictions int64    `json:"total_predictions"`
+		UniqueTaxids     int64    `json:"unique_taxids"`
+		AvgGenomeSize    *float64 `json:"avg_genome_size"`
+		AvgGC            *float64 `json:"avg_gc"`
 	}
 	type InsightsResponse struct {
-		KPIs         KPIs        `json:"kpis"`
-		Superkingdoms []KV       `json:"superkingdoms"`
-		TopKingdoms  []TopKV    `json:"top_kingdoms"`
-		Histogram    []HistBin   `json:"histogram"`
-		Scatter      []ScatterPt `json:"scatter"`
+		KPIs          KPIs        `json:"kpis"`
+		Superkingdoms []KV        `json:"superkingdoms"`
+		TopKingdoms   []TopKV     `json:"top_kingdoms"`
+		Histogram     []HistBin   `json:"histogram"`
+		Scatter       []ScatterPt `json:"scatter"`
 	}
 
 	var (
-		kpis    KPIs
-		skRows  []KV
-		topRows []TopKV
+		kpis     KPIs
+		skRows   []KV
+		topRows  []TopKV
 		histRows []HistBin
-		scRows  []ScatterPt
+		scRows   []ScatterPt
 	)
 
 	// Run all five queries concurrently — total wall-time ≈ slowest query, not sum.
@@ -218,29 +247,23 @@ func (s *Server) homeInsights(c *gin.Context) {
 
 	g.Go(func() error {
 		var gs, gc sql.NullFloat64
-		var ta, ut sql.NullInt64
-		err := s.db.QueryRow(`
-			SELECT COUNT(*), COUNT(DISTINCT taxid),
-			       AVG(TRY_CAST(genome_size AS DOUBLE)),
-			       AVG(TRY_CAST(gc_percent  AS DOUBLE))
-			FROM metadata WHERE genome_size >= 1000`).Scan(&ta, &ut, &gs, &gc)
+		var ta, ut, predictions sql.NullInt64
+		err := s.db.QueryRowContext(c.Request.Context(), homeKPIsQuery).Scan(&ta, &ut, &gs, &gc, &predictions)
 		if err != nil {
 			return err
 		}
 		kpis = KPIs{
-			TotalAssemblies: ta.Int64,
-			UniqueTaxids:    ut.Int64,
-			AvgGenomeSize:   gs.Float64,
-			AvgGC:           gc.Float64,
+			TotalAssemblies:  ta.Int64,
+			UniqueTaxids:     ut.Int64,
+			AvgGenomeSize:    nullableFloat(gs),
+			AvgGC:            nullableFloat(gc),
+			TotalPredictions: predictions.Int64,
 		}
 		return nil
 	})
 
 	g.Go(func() error {
-		rows, err := s.db.Query(`
-			SELECT COALESCE(superkingdom,'(unknown)') AS label, COUNT(*) AS n
-			FROM metadata WHERE genome_size >= 1000
-			GROUP BY 1 ORDER BY n DESC`)
+		rows, err := s.db.QueryContext(c.Request.Context(), homeSuperkingdomsQuery)
 		if err != nil {
 			return err
 		}
@@ -258,15 +281,7 @@ func (s *Server) homeInsights(c *gin.Context) {
 	})
 
 	g.Go(func() error {
-		rows, err := s.db.Query(`
-			SELECT kingdom AS label,
-			       AVG(TRY_CAST(obs_density_per_kb AS DOUBLE)) AS density,
-			       COUNT(*) AS cnt,
-			       COALESCE(MAX(superkingdom),'(unknown)') AS superkingdom
-			FROM metadata
-			WHERE kingdom IS NOT NULL AND kingdom <> ''
-			  AND obs_density_per_kb IS NOT NULL AND genome_size >= 1000
-			GROUP BY 1 ORDER BY density DESC LIMIT 10`)
+		rows, err := s.db.QueryContext(c.Request.Context(), homeTopKingdomsQuery)
 		if err != nil {
 			return err
 		}
@@ -311,9 +326,8 @@ func (s *Server) homeInsights(c *gin.Context) {
 			SELECT TRY_CAST(genome_size AS DOUBLE) AS gs,
 			       TRY_CAST(gc_percent  AS DOUBLE) AS gc,
 			       COALESCE(superkingdom,'(unknown)') AS sk
-			FROM metadata
-			WHERE genome_size IS NOT NULL AND gc_percent IS NOT NULL
-			  AND genome_size >= 1000
+			FROM metadata_all
+			WHERE genome_size > 0 AND gc_percent IS NOT NULL
 			USING SAMPLE 5000 ROWS`)
 		if err != nil {
 			return err
@@ -353,11 +367,11 @@ func (s *Server) homeInsights(c *gin.Context) {
 	}
 
 	resp := InsightsResponse{
-		KPIs:         kpis,
+		KPIs:          kpis,
 		Superkingdoms: skRows,
-		TopKingdoms:  topRows,
-		Histogram:    histRows,
-		Scatter:      scRows,
+		TopKingdoms:   topRows,
+		Histogram:     histRows,
+		Scatter:       scRows,
 	}
 	payload, err := json.Marshal(resp)
 	if err != nil {
@@ -869,11 +883,11 @@ func (s *Server) zdnaSearch(c *gin.Context) {
 	args := []any{}
 	if v := strings.TrimSpace(c.Query("chr")); v != "" {
 		whereParts = append(whereParts, `"Chromosome" = ?`)
-		args = append(args, v)
+		args = append(args, accessionChromosome(v, strings.TrimSpace(c.Query("assembly_eq"))))
 	}
 	if v := strings.TrimSpace(c.Query("assembly_eq")); v != "" {
-		whereParts = append(whereParts, `"Assembly" = ?`)
-		args = append(args, v)
+		whereParts = append(whereParts, `assembly = ?`)
+		args = append(args, accessionChromosome(v, strings.TrimSpace(c.Query("assembly_eq"))))
 	}
 	if v := c.Query("start_gte"); v != "" {
 		if n, err := strconv.ParseFloat(v, 64); err == nil {
@@ -917,7 +931,7 @@ func (s *Server) zdnaSearch(c *gin.Context) {
 			return
 		}
 	}
-	selectList := `"Chromosome","Start","End","Z-DNA Score","Sequence"`
+	selectList := `"Chromosome","Start","End","Z-DNA Score","Sequence",assembly`
 	orderBy := ""
 	if sortCol != "" {
 		orderBy = fmt.Sprintf(` ORDER BY "%s" %s`, sortCol, order)
@@ -936,6 +950,12 @@ func (s *Server) zdnaSearch(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	for _, row := range data {
+		asm, _ := row["assembly"].(string)
+		chrom, _ := row["Chromosome"].(string)
+		row["Chromosome"] = displayChromosome(chrom, asm)
+		delete(row, "assembly")
 	}
 	c.JSON(http.StatusOK, gin.H{"columns": []string{"Chromosome", "Start", "End", "Z-DNA Score", "Sequence"}, "rows": data, "limit": limit, "offset": offset, "total": total})
 }
@@ -971,9 +991,13 @@ func (s *Server) zdnaExport(c *gin.Context) {
 
 	whereParts := []string{}
 	args := []any{}
+	if v := strings.TrimSpace(c.Query("assembly_eq")); v != "" {
+		whereParts = append(whereParts, `assembly = ?`)
+		args = append(args, v)
+	}
 	if v := strings.TrimSpace(c.Query("chr")); v != "" {
 		whereParts = append(whereParts, `"Chromosome" = ?`)
-		args = append(args, v)
+		args = append(args, accessionChromosome(v, strings.TrimSpace(c.Query("assembly_eq"))))
 	}
 	if v := c.Query("start_gte"); v != "" {
 		if n, err := strconv.ParseFloat(v, 64); err == nil {
@@ -1012,7 +1036,7 @@ func (s *Server) zdnaExport(c *gin.Context) {
 	if sortCol != "" {
 		orderBy = fmt.Sprintf(` ORDER BY "%s" %s`, sortCol, order)
 	}
-	q := `SELECT "Chromosome","Start","End","Z-DNA Score","Sequence" FROM data ` + where + orderBy
+	q := `SELECT "Chromosome","Start","End","Z-DNA Score","Sequence",assembly FROM data ` + where + orderBy
 	if lim > 0 {
 		q += fmt.Sprintf(" LIMIT %d OFFSET %d", lim, off)
 	}
@@ -1047,7 +1071,8 @@ func (s *Server) zdnaExport(c *gin.Context) {
 				rec[i] = fmt.Sprint(v)
 			}
 		}
-		_ = w.Write(rec)
+		rec[0] = displayChromosome(rec[0], rec[5])
+		_ = w.Write(rec[:5])
 	}
 	w.Flush()
 }
@@ -1060,14 +1085,39 @@ func (s *Server) zdnaDistinctChr(c *gin.Context) {
 		limit = 10
 	}
 
-	q := `SELECT  "Chromosome" AS v FROM chromosomes`
+	assembly := strings.TrimSpace(c.Query("assembly_eq"))
+	expression := `"Chromosome"`
+	source := "chromosomes"
 	args := []any{}
-	if prefix != "" {
-		q += ` WHERE LOWER("Chromosome") LIKE LOWER(?)`
-		args = append(args, prefix+"%")
+	clauses := []string{}
+	if assembly != "" {
+		source = "data"
+		clauses = append(clauses, "assembly = ?")
+		args = append(args, assembly)
+		if assembly == humanAssembly {
+			expression = `CASE "Chromosome"`
+			for i := 0; i < 24; i++ {
+				accession := fmt.Sprintf("NC_%06d.1", 60925+i)
+				expression += " WHEN '" + accession + "' THEN '" + displayChromosome(accession, assembly) + "'"
+			}
+			expression += ` ELSE "Chromosome" END`
+		}
 	}
-	//q += ` ORDER BY v LIMIT ?`
-	//args = append(args, limit)
+	if prefix != "" {
+		if assembly == humanAssembly {
+			clauses = append(clauses, "(LOWER("+expression+") LIKE LOWER(?) OR LOWER(\"Chromosome\") LIKE LOWER(?))")
+			args = append(args, prefix+"%", prefix+"%")
+		} else {
+			clauses = append(clauses, "LOWER("+expression+") LIKE LOWER(?)")
+			args = append(args, prefix+"%")
+		}
+	}
+	q := "SELECT DISTINCT " + expression + " AS v FROM " + source
+	if len(clauses) > 0 {
+		q += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	q += " ORDER BY v LIMIT ?"
+	args = append(args, limit)
 
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -1100,9 +1150,13 @@ func (s *Server) zdnaScoreHistogram(c *gin.Context) {
 
 	whereParts := []string{}
 	args := []any{}
+	if v := strings.TrimSpace(c.Query("assembly_eq")); v != "" {
+		whereParts = append(whereParts, `assembly = ?`)
+		args = append(args, v)
+	}
 	if v := strings.TrimSpace(c.Query("chr")); v != "" {
 		whereParts = append(whereParts, `"Chromosome" = ?`)
-		args = append(args, v)
+		args = append(args, accessionChromosome(v, strings.TrimSpace(c.Query("assembly_eq"))))
 	}
 	if v := c.Query("score_min"); v != "" {
 		if n, err := strconv.ParseFloat(v, 64); err == nil {
@@ -1124,7 +1178,7 @@ func (s *Server) zdnaScoreHistogram(c *gin.Context) {
 	buildSQL := func(withSample bool) string {
 		fc := "FROM data"
 		if withSample && sampleRows > 0 {
-			fc = fmt.Sprintf("FROM data USING SAMPLE %d ROWS", sampleRows)
+			fc = fmt.Sprintf(`FROM (SELECT "Chromosome", assembly, "Z-DNA Score" FROM data USING SAMPLE %d ROWS) sampled`, sampleRows)
 		}
 		return fmt.Sprintf(`
 SELECT CAST(floor("Z-DNA Score" / %[1]d) * %[1]d AS INT) AS bin,
@@ -1184,6 +1238,7 @@ type sqlPayload struct {
 
 func (s *Server) sqlPost(c *gin.Context) {
 	var p sqlPayload
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 2*sqlMaxLength)
 	if err := c.ShouldBindJSON(&p); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
 		return
@@ -1191,28 +1246,65 @@ func (s *Server) sqlPost(c *gin.Context) {
 	runSQL(s, c, strings.TrimSpace(p.SQL))
 }
 func runSQL(s *Server, c *gin.Context, stmt string) {
-	if stmt == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "empty sql"})
+	if !allowSQL(c.ClientIP()) {
+		c.Header("Retry-After", "60")
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "SQL request limit: 120 per minute per IP"})
 		return
 	}
-	up := strings.ToUpper(stmt)
-	if !(strings.HasPrefix(up, "SELECT ") || strings.HasPrefix(up, "EXPLAIN ") || strings.HasPrefix(up, "DESCRIBE ")) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "only SELECT/EXPLAIN/DESCRIBE are allowed"})
+	if err := validateSQL(stmt); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	rows, err := s.db.Query(stmt)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), sqlTimeout)
+	defer cancel()
+	// A read-only transaction is not supported by this driver. Validation and
+	// disabled external access apply before the engine sees the statement.
+	rows, err := s.db.QueryContext(ctx, "SELECT * FROM ("+stmt+") AS portal_result LIMIT 50001")
 	if err != nil {
-		log.Println("sql error:", err, "sql:", stmt)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		status := http.StatusBadRequest
+		if ctx.Err() != nil {
+			status = http.StatusRequestTimeout
+		}
+		c.JSON(status, gin.H{"error": "SQL query failed or exceeded the 30-second limit"})
 		return
 	}
 	defer rows.Close()
-	data, err := rowsToMaps(rows)
+	cols, err := rows.Columns()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot read result columns"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": data})
+	data := make([]map[string]any, 0)
+	truncated := false
+	for rows.Next() {
+		if len(data) == sqlMaxRows {
+			truncated = true
+			break
+		}
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot read query result"})
+			return
+		}
+		row := make(map[string]any, len(cols))
+		for i, col := range cols {
+			if b, ok := vals[i].([]byte); ok {
+				row[col] = string(b)
+			} else {
+				row[col] = vals[i]
+			}
+		}
+		data = append(data, row)
+	}
+	if rows.Err() != nil {
+		c.JSON(http.StatusRequestTimeout, gin.H{"error": "query interrupted"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": data, "truncated": truncated, "row_limit": sqlMaxRows})
 }
 
 // Global base filter for all metadata queries
@@ -1339,6 +1431,9 @@ func main() {
 	}
 
 	r := gin.New()
+	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		log.Fatal("invalid TRUSTED_PROXIES: ", err)
+	}
 	r.Use(gin.Recovery()) // panic recovery without request logging
 	r.Use(corsMiddleware(cfg.CORSOrigins))
 	r.Use(s.databaseRequired())

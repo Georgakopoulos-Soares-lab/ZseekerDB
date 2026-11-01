@@ -5,7 +5,6 @@ import {
   Typography,
   Paper,
   Stack,
-  Link as MuiLink,
   Divider,
   Button,
   List,

@@ -1,4 +1,7 @@
-import { Divider } from '@mui/material';
+import DashboardIcon from '@mui/icons-material/Dashboard';
+import AccountCircleIcon from '@mui/icons-material/AccountCircle';
+import SettingsIcon from '@mui/icons-material/Settings';
+import { Divider, Drawer, Toolbar } from '@mui/material';
 import { Link, useLocation } from 'react-router-dom';
 import {
   List,

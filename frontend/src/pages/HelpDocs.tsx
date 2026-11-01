@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 // src/pages/HelpDocs.tsx
 import { useMemo, useState, useRef, useEffect } from 'react';
 import {
@@ -17,7 +18,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 type Section = {
   id: string;
   title: string;
-  body: JSX.Element;
+  body: ReactNode;
   defaultExpanded?: boolean;
 };
 
@@ -128,7 +129,7 @@ export default function HelpDocs() {
             <Typography paragraph>
               Use the <b>Export</b> menu to download the current query results as CSV, TSV, JSON,
               XML or Excel (HTML). For very large datasets, export in batches or consider
-              server‑side export.
+              server‑side export. Coordinates in result tables and CSV, TSV, JSON, XML and Excel exports use zero-based starts and inclusive ends (length = End − Start + 1). BED archives require half-open ends (End + 1).
             </Typography>
           </>
         ),
@@ -143,8 +144,7 @@ export default function HelpDocs() {
                 <b>Histogram:</b> Distribution of Z‑DNA Score (bins of 10).
               </li>
               <li>
-                <b>Density (100kb windows):</b> Requires a selected chromosome; shows counts per
-                100,000bp window.
+                <b>Predicted loci per 100 kb:</b> Requires a selected chromosome; shows the number of predicted loci whose zero-based start falls in each 100,000 bp window. This is a locus count, not a base-pair density.
               </li>
               <li>
                 <b>Start vs Score (scatter):</b> Sampled points (e.g., 20k) for speed.
@@ -186,7 +186,6 @@ export default function HelpDocs() {
     sections.forEach(s => (init[s.id] = !!s.defaultExpanded));
     return init;
   });
-  const allOpen = Object.values(expanded).every(Boolean);
   const toggleAll = (value: boolean) => {
     const next: Record<string, boolean> = {};
     sections.forEach(s => (next[s.id] = value));
@@ -255,7 +254,7 @@ export default function HelpDocs() {
       {/* Accordions */}
       <Box>
         {sections.map(s => (
-          <Box key={s.id} ref={(el) => (refs.current[s.id] = el)}>
+          <Box key={s.id} ref={(el: HTMLDivElement | null) => { refs.current[s.id] = el; }}>
             <Accordion
               disableGutters
               square

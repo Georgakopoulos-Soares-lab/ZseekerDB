@@ -5,7 +5,7 @@ import {
   Button,
   Chip,
   CircularProgress,
-  Grid,
+  GridLegacy as Grid,
   IconButton,
   Menu,
   MenuItem,
@@ -23,10 +23,12 @@ import DownloadIcon from '@mui/icons-material/Download';
 import ReactECharts from 'echarts-for-react';
 import { useSearchParams } from 'react-router-dom';
 import { useDebounce } from '../hooks/useDebounce';
+import { toDisplay, chromosomeWhere, chromosomeSort, chromosomePrefixWhere } from '../utils/chromosomes';
 
 /* ------------------------------- Types/Helpers ------------------------------ */
 
 type Row = {
+  assembly?: string;
   Chromosome: string;
   Start: number;
   End: number;
@@ -34,7 +36,11 @@ type Row = {
   Sequence: string;
 };
 
-type KV = { label: string };
+type KV = { label: string; assembly?: string };
+
+function displayRow({ assembly, ...row }: Row): Row {
+  return { ...row, Chromosome: toDisplay(row.Chromosome, assembly) };
+}
 
 const DEFAULT_PAGE_SIZE = 25;
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
@@ -322,9 +328,9 @@ export default function Explorer() {
           where = `assembly IN (SELECT assembly FROM metadata WHERE genome_size >= 1000 AND tax_name = ${q(species!)})`;
         }
 
-        const andPrefix = prefix ? `AND lower("Chromosome") LIKE ${q(prefix + '%')}` : '';
+        const andPrefix = prefix ? `AND ${chromosomePrefixWhere(prefix)}` : '';
         const sql = `
-          SELECT DISTINCT "Chromosome" AS label
+          SELECT DISTINCT "Chromosome" AS label, assembly
           FROM data
           WHERE ${where} ${andPrefix}
           LIMIT ${AUTOCOMPLETE_LIMIT}
@@ -332,7 +338,10 @@ export default function Explorer() {
         const opts = await runSQL<KV>(sql);
         
         // Apply natural sort to chromosome options
-        const sorted = opts.sort((a, b) => naturalSort(a.label, b.label));
+        const mapped = opts.filter(o => o.label.toLowerCase().startsWith(prefix) || toDisplay(o.label, o.assembly).toLowerCase().startsWith(prefix))
+          .map(o => ({ label: toDisplay(o.label, o.assembly) }));
+        const sorted = Array.from(new Set(mapped.map(o => o.label)))
+          .sort(chromosomeSort).map(label => ({ label }));
         
         if (!dead) setChrOpts(sorted);
       } finally {
@@ -350,7 +359,7 @@ export default function Explorer() {
     if (species)        parts.push(`assembly IN (SELECT assembly FROM metadata WHERE genome_size >= 1000 AND tax_name = ${q(species)})`);
     if (lockedAssembly) parts.push(`assembly = ${q(lockedAssembly)}`);
 
-    if (chr) parts.push(`"Chromosome" = ${q(chr)}`);
+    if (chr) parts.push(chromosomeWhere(chr, lockedAssembly));
     if (startMin) parts.push(`"Start" >= ${Number(startMin)}`);
     if (startMax) parts.push(`"Start" <= ${Number(startMax)}`);
     if (endMin)   parts.push(`"End"   >= ${Number(endMin)}`);
@@ -365,13 +374,15 @@ export default function Explorer() {
   }, [species, lockedAssembly, chr, startMin, startMax, endMin, endMax, scoreMin, scoreMax, contains]);
 
   /* --------------------------------- Results SQL -------------------------------- */
+  const rowsRequest = useRef(0);
   async function fetchRowsAndCount(p = page, size = rpp) {
+    const request = ++rowsRequest.current;
     if (!hasQueryContext) return;
     setLoading(true);
     const offset = p * size;
 
     const sqlRows = `
-      SELECT "Chromosome","Start","End","Z-DNA Score" AS Score,"Sequence"
+      SELECT "Chromosome","Start","End","Z-DNA Score" AS Score,"Sequence",assembly
       FROM data
       WHERE ${whereSql}
       ORDER BY "Z-DNA Score" DESC
@@ -387,10 +398,11 @@ export default function Explorer() {
         runSQL<Row>(sqlRows),
         runSQL<{ n: number }>(sqlCount),
       ]);
-      setRows(r);
+      if (request !== rowsRequest.current) return;
+      setRows(r.map(displayRow));
       setTotal(Number(getVal(c?.[0], 'n') ?? 0));
     } finally {
-      setLoading(false);
+      if (request === rowsRequest.current) setLoading(false);
     }
   }
 
@@ -400,6 +412,7 @@ export default function Explorer() {
     if (tab === 'viz') fetchViz();
   }
   function onReset() {
+    rowsRequest.current++;
     setChr(null); setChrInput('');
     setStartMin(''); setStartMax('');
     setEndMin('');   setEndMax('');
@@ -409,8 +422,9 @@ export default function Explorer() {
   }
 
   useEffect(() => {
-    if (!hasQueryContext) return;
+    if (!hasQueryContext) { setRows([]); setTotal(0); setLoading(false); return; }
     fetchRowsAndCount(page, rpp);
+    return () => { rowsRequest.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, rpp, whereSql, hasQueryContext]);
 
@@ -428,7 +442,7 @@ export default function Explorer() {
     }
 
     const selectSql = `
-      SELECT "Chromosome","Start","End","Z-DNA Score" AS Score,"Sequence"
+      SELECT "Chromosome","Start","End","Z-DNA Score" AS Score,"Sequence",assembly
       FROM data
       WHERE ${whereSql}
       ORDER BY "Z-DNA Score" DESC
@@ -440,7 +454,7 @@ export default function Explorer() {
       const batchSql = `${selectSql} LIMIT ${BATCH_EXPORT} OFFSET ${offset}`;
       // eslint-disable-next-line no-await-in-loop
       const part = await runSQL<Row>(batchSql);
-      all.push(...part);
+      all.push(...part.map(displayRow));
       offset += BATCH_EXPORT;
       if (offset >= MAX_EXPORT_ROWS) break;
     }
@@ -462,12 +476,13 @@ export default function Explorer() {
   const [hist, setHist] = useState<{ bin: number; n: number }[]>([]);
   const [density, setDensity] = useState<{ start: number; n: number }[]>([]);
   const [scatter, setScatter] = useState<{ x: number; y: number }[]>([]);
-  const [kmers, setKmers] = useState<{ motif: string; n: number }[]>([]);
   const [boxRows, setBoxRows] = useState<{ chr: string; min: number; q1: number; median: number; q3: number; max: number }[]>([]);
   const [lenScore, setLenScore] = useState<{ len: number; score: number }[]>([]); // NEW
   const [genomicDist, setGenomicDist] = useState<{ pos: number; score: number }[]>([]); // NEW
 
+  const vizRequest = useRef(0);
   async function fetchViz() {
+    const request = ++vizRequest.current;
     if (!hasQueryContext) return;
     setVizLoading(true);
     try {
@@ -513,7 +528,7 @@ export default function Explorer() {
       // 5) Box stats per chromosome (up to 30 chromosomes)
       const sqlBox = `
         SELECT
-          chr, "min", q1, median, q3, "max"
+          chr, assembly, "min", q1, median, q3, "max"
         FROM (
           SELECT
             s.*,
@@ -521,18 +536,18 @@ export default function Explorer() {
             COUNT(*)    OVER ()                       AS total
           FROM (
             SELECT
-              "chr",
+              "chr", assembly,
               MIN(s)            AS "min",
               quantile(s,0.25)  AS q1,
               quantile(s,0.50)  AS median,
               quantile(s,0.75)  AS q3,
               MAX(s)            AS "max"
             FROM (
-              SELECT "Chromosome" AS "chr", "Z-DNA Score" AS s
+              SELECT "Chromosome" AS "chr", assembly, "Z-DNA Score" AS s
               FROM data
               WHERE ${whereSql}
             ) f
-            GROUP BY "chr"
+            GROUP BY "chr", assembly
           ) AS s
         ) AS ranked
         WHERE rn <= CASE WHEN total <= 30 THEN total ELSE 30 END
@@ -557,6 +572,7 @@ export default function Explorer() {
         runSQL<{ len: number; score: number }>(sqlLenScore),
       ]);
 
+      if (request !== vizRequest.current) return;
       const ok = <T,>(i: number, def: T): T =>
         results[i].status === 'fulfilled' ? (results[i] as PromiseFulfilledResult<T>).value : def;
 
@@ -575,7 +591,7 @@ export default function Explorer() {
       })).filter(v => Number.isFinite(v.pos) && Number.isFinite(v.score)));
 
       setBoxRows(ok(4, []).map(d => ({
-        chr:    String(getVal(d, 'chr')),
+        chr:    toDisplay(String(getVal(d, 'chr')), String(getVal(d, 'assembly'))),
         min:    Number(getVal(d, 'min')),
         q1:     Number(getVal(d, 'q1')),
         median: Number(getVal(d, 'median')),
@@ -587,14 +603,14 @@ export default function Explorer() {
         .filter(v => Number.isFinite(v.len) && Number.isFinite(v.score)));
 
     } finally {
-      setVizLoading(false);
+      if (request === vizRequest.current) setVizLoading(false);
     }
   }
 
   useEffect(() => {
-    if (tab !== 'viz') return;
-    if (!hasQueryContext) return;
+    if (tab !== 'viz' || !hasQueryContext) { setVizLoading(false); return; }
     fetchViz();
+    return () => { vizRequest.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, whereSql, chr, hasQueryContext]);
 
@@ -692,7 +708,7 @@ export default function Explorer() {
     [hist, baseTooltip, axisLabelColor, axisNameColor]
   );
 
-  // 2. Density (Sites / 100kb)
+  // 2. Density (Predicted loci / 100 kb)
   const densityOpt = useMemo(() => {
     if (!density.length) return null;
 
@@ -709,7 +725,7 @@ export default function Explorer() {
           trigger: 'axis',
           extraCssText: 'max-width: 140px; white-space: nowrap;',
           formatter: (p: any) =>
-            `Position: ${fmtNum(p.value[0])}\nSites / 100kb: ${fmtNum(
+            `Position: ${fmtNum(p.value[0])}\nPredicted loci / 100 kb: ${fmtNum(
               p.value[1]
             )}`,
         },
@@ -728,7 +744,7 @@ export default function Explorer() {
         },
         yAxis: {
           type: 'value',
-          name: 'Sites / 100kb',
+          name: 'Predicted loci / 100 kb',
           nameLocation: 'middle',
           nameGap: 60,
           nameTextStyle: { color: axisNameColor },
@@ -768,7 +784,7 @@ export default function Explorer() {
       },
       yAxis: {
         type: 'value',
-        name: 'Sites / 100kb',
+        name: 'Predicted loci / 100 kb',
         nameLocation: 'middle',
         nameGap: 60,
         nameTextStyle: { color: axisNameColor },
@@ -835,7 +851,7 @@ export default function Explorer() {
     if (!boxRows.length) return null;
 
     const sortedBoxRows = [...boxRows].sort((a, b) =>
-      naturalSort(a.chr, b.chr)
+      chromosomeSort(a.chr, b.chr)
     );
 
     return {
@@ -994,6 +1010,11 @@ export default function Explorer() {
   return (
     <Box sx={{ p: 2 }}>
       <Typography variant="h6" sx={{ mb: 2 }}>Sequence search</Typography>
+      {vizLoading && <CircularProgress size={20} aria-label="Loading visualizations" />}
+      <Typography variant="body2" sx={{ mb: 2 }}>
+        Coordinates and result exports use zero-based starts and inclusive ends.
+        RNA-virus sequences are scored as cDNA; scores indicate sequence-based Z-forming potential.
+      </Typography>
 
       {/* Species + Locked Assembly banner */}
       <Paper sx={{ p: 2, mb: 2 }}>
@@ -1263,7 +1284,7 @@ export default function Explorer() {
         <FullWidthChart option={histOpt} height={400} deps={[tab, histOpt]} />
       </Grid>
       <Grid item xs={12} md={6} sx={{ width: '45%' }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Genomic Distribution</Typography>
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Genomic Distribution {chr ? `— ${chr}` : ''}</Typography>
         {genomicDistOpt ? (
           <FullWidthChart option={genomicDistOpt} height={400} deps={[tab, genomicDistOpt]} />
         ) : (
@@ -1305,7 +1326,7 @@ export default function Explorer() {
     {/* Row 3 */}
     <Grid container spacing={2}>
       <Grid item xs={12} md={6}  sx={{ width: '45%' }}>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Z-DNA Density per 100 kb {chr ? `— ${chr}` : '(select chromosome)'}</Typography>
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Predicted loci per 100 kb {chr ? `— ${chr}` : '(select chromosome)'}</Typography>
         {densityOpt ? (
           <FullWidthChart option={densityOpt} height={400} deps={[tab, chr, densityOpt]} />
         ) : (
@@ -1328,31 +1349,4 @@ export default function Explorer() {
     </Box>
   );
 }
-
-function naturalSort(a: string, b: string) {
-    // Split strings into text and number parts
-    const reA = /[^\d]+|\d+/g;
-    const partsA = a.match(reA) || [];
-    const partsB = b.match(reA) || [];
-    
-    for (let i = 0; i < Math.min(partsA.length, partsB.length); i++) {
-        const partA = partsA[i];
-        const partB = partsB[i];
-        
-        // Check if both parts are numeric
-        const numA = parseInt(partA, 10);
-        const numB = parseInt(partB, 10);
-        
-        if (!isNaN(numA) && !isNaN(numB)) {
-            // Compare as numbers
-            if (numA !== numB) return numA - numB;
-        } else {
-            // Compare as strings
-            if (partA !== partB) return partA.localeCompare(partB);
-        }
-    }
-    
-    return partsA.length - partsB.length;
-}
-
 

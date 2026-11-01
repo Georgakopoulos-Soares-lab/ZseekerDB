@@ -1,14 +1,14 @@
 // src/pages/About.tsx
-import { FC } from 'react';
+import type { FC } from 'react';
+import DatasetProvenance from '../components/DatasetProvenance';
 import {
   Box,
   Typography,
   Paper,
-  Grid,
+  GridLegacy as Grid,
   Stack,
   Link as MuiLink,
-  Divider,
-  useTheme
+  Divider
 } from '@mui/material';
 
 // Reusable Card component
@@ -54,7 +54,6 @@ const PersonCard: FC<{
 );
 
 const AboutDoc: FC = () => {
-  const theme = useTheme();
   const year = new Date().getFullYear();
 
   return (
@@ -82,18 +81,29 @@ const AboutDoc: FC = () => {
           <Card>
             <Typography sx={{ color: 'text.secondary' }}>
               ZSeekerDB is an open, cross-species resource for discovering and comparing candidate Z-DNA and Z-RNA loci
-              across organismal genomes. It combines the ZSeeker prediction framework with a versioned, analysis-oriented
+              across organismal and viral genomes. It combines the ZSeeker prediction framework with an analysis-oriented
               backend and a modern web interface to support rigorous, reproducible analyses.
             </Typography>
           </Card>
         </Grid>
 
         <Grid item xs={12}>
+          <Card title="Dataset provenance"><DatasetProvenance /></Card>
+        </Grid>
+        <Grid item xs={12}>
+          <Card title="Prediction scope">
+            <Typography color="text.secondary">
+              These records describe sequence-based Z-forming potential. RNA-virus genomes are
+              scored as cDNA sequences; these scores do not validate Z-RNA formation.
+            </Typography>
+          </Card>
+        </Grid>
+        <Grid item xs={12}>
           <Card title="Mission">
             <Typography color="text.secondary">
               Our mission is to make high-quality Z-form annotations broadly accessible to researchers in genomics,
               structural biology and immunology, and to support experimental prioritization with transparent methods,
-              rich metadata and stable releases.
+              rich metadata and reproducible data.
             </Typography>
           </Card>
         </Grid>
@@ -146,7 +156,7 @@ const AboutDoc: FC = () => {
           <Card title="Contact">
             <Typography>
               General inquiries: <MuiLink href="mailto:ilias@austin.utexas.edu">ilias@austin.utexas.edu</MuiLink><br />
-              Project website: <MuiLink href="https://zseekerdb.com" rel="noopener">zseekerdb.com</MuiLink>
+              Project website: <MuiLink href="https://zseeker-db.com/" rel="noopener">zseeker-db.com</MuiLink>
             </Typography>
           </Card>
         </Grid>

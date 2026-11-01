@@ -1,11 +1,10 @@
 // src/pages/Privacy.tsx
-import { FC } from 'react';
+import type { FC } from 'react';
 import {
   Box,
   Typography,
   Paper,
   Stack,
-  Link as MuiLink,
   Divider
 } from '@mui/material';
 

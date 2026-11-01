@@ -1,7 +1,9 @@
 import * as React from 'react';
-import { Autocomplete, TextField, CircularProgress, createFilterOptions } from '@mui/material';
+import { toDisplay, chromosomeSort } from '../utils/chromosomes';
+import { Autocomplete, TextField, CircularProgress } from '@mui/material';
 
 type Props = {
+  assembly?: string | null;
   value: string;
   onChange: (newValue: string) => void; // επιστρέφει την επιλεγμένη τιμή
   label?: string;
@@ -9,11 +11,8 @@ type Props = {
   limit?: number;
 };
 
-const localFilter = createFilterOptions<string>({
-  stringify: (opt) => opt,
-});
-
 export default function ChromosomeAutocomplete({
+  assembly,
   value,
   onChange,
   label = 'Chromosome',
@@ -27,15 +26,13 @@ export default function ChromosomeAutocomplete({
   const cacheRef = React.useRef<Map<string, string[]>>(new Map());
 
   const fetchOptions = React.useCallback(async (prefix: string) => {
-    const key = prefix.trim();
+    const key = `${assembly ?? ''}:${prefix.trim()}`;
     if (cacheRef.current.has(key)) { setOptions(cacheRef.current.get(key)!); return; }
 
     abortRef.current?.abort();
     const ac = new AbortController(); abortRef.current = ac;
 
-    const url = key.length > 0
-      ? `/api/zdna/distinct_chr?prefix=${encodeURIComponent(key)}&limit=${limit}`
-      : `/api/zdna/distinct_chr?limit=${limit}`;
+    const url = `/api/zdna/distinct_chr?prefix=${encodeURIComponent(prefix.trim())}&limit=${limit}&assembly_eq=${encodeURIComponent(assembly ?? '')}`;
 
     try {
       setLoading(true);
@@ -44,7 +41,7 @@ export default function ChromosomeAutocomplete({
       const json = await res.json();
       const vals: string[] = Array.isArray(json?.values) ? json.values : [];
       // dedupe (για σιγουριά) + κόψε στο limit
-      const uniq = Array.from(new Set(vals)).slice(0, limit);
+      const uniq = Array.from(new Set(vals.map(v => toDisplay(v, assembly)))).sort(chromosomeSort).slice(0, limit);
       cacheRef.current.set(key, uniq);
       setOptions(uniq);
     } catch (err: any) {
@@ -52,7 +49,9 @@ export default function ChromosomeAutocomplete({
     } finally {
       setLoading(false);
     }
-  }, [limit]);
+  }, [limit, assembly]);
+
+  React.useEffect(() => { setInput(value); }, [value]);
 
   // Prefetch αρχικής λίστας
   React.useEffect(() => { fetchOptions(''); }, [fetchOptions]);
@@ -70,10 +69,7 @@ export default function ChromosomeAutocomplete({
       openOnFocus
       options={options}
       // Ενεργοποιούμε client-side filtering (case-insensitive)
-      filterOptions={(opts, state) => {
-        const filtered = localFilter(opts, state);
-        return filtered.slice(0, limit);
-      }}
+      filterOptions={(opts) => opts.slice(0, limit)}
       loading={loading}
       loadingText="Loading…"
       noOptionsText={input ? 'No matches' : 'Start typing to see chromosomes'}

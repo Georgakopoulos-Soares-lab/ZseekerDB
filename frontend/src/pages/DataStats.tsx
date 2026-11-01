@@ -1,7 +1,7 @@
 // frontend/src/pages/DataStats.tsx
 import { useEffect, useState } from 'react';
 import {
-  Box, Grid, Paper, Typography, CircularProgress,
+  Box, GridLegacy as Grid, Paper, Typography, CircularProgress,
   List, ListItem, ListItemText
 } from '@mui/material';
 

@@ -4,7 +4,6 @@ import {
   Paper,
   Typography,
   CircularProgress,
-  Grid,
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import ReactECharts from 'echarts-for-react';
@@ -12,46 +11,6 @@ import ReactECharts from 'echarts-for-react';
 /* =============================================================================
    helpers
    ========================================================================== */
-
-   // ---- color helpers ----
-function hslToHex(h: number, s: number, l: number) {
-  s = Math.max(0, Math.min(1, s));
-  l = Math.max(0, Math.min(1, l));
-  const c = (1 - Math.abs(2 * l - 1)) * s;
-  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
-  const m = l - c / 2;
-  let r = 0, g = 0, b = 0;
-  if (0 <= h && h < 60) [r, g, b] = [c, x, 0];
-  else if (60 <= h && h < 120) [r, g, b] = [x, c, 0];
-  else if (120 <= h && h < 180) [r, g, b] = [0, c, x];
-  else if (180 <= h && h < 240) [r, g, b] = [0, x, c];
-  else if (240 <= h && h < 300) [r, g, b] = [x, 0, c];
-  else [r, g, b] = [c, 0, x];
-  const toHex = (v: number) => Math.round((v + m) * 255).toString(16).padStart(2, '0');
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-}
-
-/**
- * Δίνει διαφορετικό χρώμα σε ΚΑΘΕ node.
- * - Χρησιμοποιεί golden-angle spread για ξεχωριστές αποχρώσεις στα αδέρφια.
- * - Κλιμακώνει lightness ανά βάθος για διακριτότητα στα levels.
- */
-function colorizeTree(nodes: TreeNode[], depth = 0, hueOffset = 0) {
-  if (!nodes) return;
-  const GOLDEN = 137.508; // golden angle σε μοίρες
-  const lightness = [0.55, 0.50, 0.45, 0.40, 0.35][Math.min(depth, 4)];
-  const saturation = 0.62;
-
-  nodes.forEach((n, i) => {
-    const h = (hueOffset + i * GOLDEN) % 360;
-    n.itemStyle = n.itemStyle || {};
-    n.itemStyle.color = hslToHex(h, saturation, lightness);
-    if (n.children && n.children.length) {
-      // διαφορετικό offset ανά κλάδο για να μη “συμπέσουν” αποχρώσεις σε άλλα levels
-      colorizeTree(n.children, depth + 1, (h + 23) % 360);
-    }
-  });
-}
 
 async function fetchSql<T = any>(sql: string): Promise<T[]> {
   const normalized = sql.replace(/\s+/g, ' ').trim();
@@ -71,6 +30,19 @@ async function fetchSql<T = any>(sql: string): Promise<T[]> {
              : Array.isArray(j?.data) ? j.data
              : []) as T[];
   return rows;
+}
+
+// The species hierarchy exceeds the SQL endpoint's per-request row limit.
+// Page the ordered aggregation before applying the display's top-30 trimming.
+async function fetchHierarchy(sql: string): Promise<AggRow[]> {
+  const rows: AggRow[] = [];
+  const pageSize = 50000;
+  for (let offset = 0; offset < 1000000; offset += pageSize) {
+    const page = await fetchSql<AggRow>(`${sql} ORDER BY 1,2,3,4 LIMIT ${pageSize} OFFSET ${offset}`);
+    rows.push(...page);
+    if (page.length < pageSize) return rows;
+  }
+  throw new Error('Taxonomy hierarchy exceeds the supported display size');
 }
 
 const fmtInt = (n: number | null | undefined) =>
@@ -122,58 +94,6 @@ function canonSK(s: string | null): SK | null {
   if (x === 'eukaryota' || x === 'eukaryotes' || x === 'eukaryote') return 'Eukaryota';
   if (x === 'viruses' || x === 'virus') return 'Viruses';
   return null; // κρατάμε αυστηρά τα 4
-}
-
-/** Μπλε παλέτα (βαθιές αποχρώσεις – χωρίς πολύ ανοιχτά) */
-const BLUE_PALETTE = [
-  '#0B3C8C','#0F4AA8','#1558C4','#1C66DF','#2A73F2',
-  '#3A7FF6','#4D8AF7','#5C95F8','#6AA0F9','#79AAFA'
-];
-
-/** Σταθερό base χρώμα ανά superkingdom (ώστε το 1ο επίπεδο να μην “λευκίζει”) */
-/*
-const SK_COLOR: Record<SK, string> = {
-  Archaea:  '#1558C4',
-  Bacteria: '#1C66DF',
-  Eukaryota:'#2A73F2',
-  Viruses:  '#0B3C8C',
-};
-*/
-/* ------------------------------- UI micro components ------------------------------- */
-
-function StatCard({ title, value, sx }: { title: string; value: string; sx?: any }) {
-  return (
-    <Paper
-      elevation={1}
-      sx={{
-        p: 2,
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        justifyContent: 'space-between',
-        ...sx
-      }}
-    >
-      <Typography variant="caption" color="text.secondary">{title}</Typography>
-      <Typography variant="h6" sx={{ mt: .5 }}>{value}</Typography>
-    </Paper>
-  );
-}
-
-function TopListCard({ title, items }: { title: string; items: KV[] }) {
-  return (
-    <Paper elevation={1} sx={{ p: 2 }}>
-      <Typography variant="caption" color="text.secondary">{title}</Typography>
-      <Box sx={{ mt: 1, display: 'grid', rowGap: 1 }}>
-        {items.map((it, i) => (
-          <Box key={`${it.label}-${i}`} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Typography variant="body2" noWrap sx={{ pr: 2 }}>{it.label || '(unknown)'}</Typography>
-            <Typography variant="body2" color="text.secondary">{fmtInt(it.n)}</Typography>
-          </Box>
-        ))}
-      </Box>
-    </Paper>
-  );
 }
 
 /* =============================================================================
@@ -236,7 +156,6 @@ export default function MetadataStats() {
             count(distinct class) AS total_classes,
             count(distinct "order") AS total_orders,
             count(distinct family) AS total_families, 
-            count(distinct genus) AS total_genus,
             count(distinct genus) AS total_genus,
             COUNT(DISTINCT tax_name)                   AS unique_species,
             AVG(try_cast(genome_size AS DOUBLE))    AS avg_genome_size,
@@ -302,7 +221,7 @@ export default function MetadataStats() {
           WHERE genome_size >= 1000
           GROUP BY 1,2,3,4
         `;
-        const dist = await fetchSql<AggRow>(distSql);
+        const dist = await fetchHierarchy(distSql);
 
         if (cancelled) return;
 
@@ -542,6 +461,10 @@ upperLabel: {
       <Typography variant="h5" align="center" sx={{ mb: 3, fontWeight: 600 }}>
         ZSeekerDB insights
       </Typography>
+      <Typography variant="body2" color="text.secondary" align="center" sx={{ mb: 2 }}>
+        Assembly summaries for genomes with predictions and genome size of at least 1,000 bp.
+        Homepage counts cover the complete assembly collection.
+      </Typography>
 
       {loading && (
         <Box sx={{ p: 4, display: 'flex', justifyContent: 'center' }}>
@@ -605,7 +528,7 @@ upperLabel: {
       { title: 'Orders', value: fmtInt(totalOrders) },
       { title: 'Families', value: fmtInt(totalFamilies) },
       { title: 'Genera', value: fmtInt(totalGenus) },
-      { title: 'Species', value: fmtInt(uniqueTaxids) },
+      { title: 'Taxon names', value: fmtInt(uniqueTaxids) },
     ].map((kpi) => (
       <Paper
         key={kpi.title}
@@ -660,7 +583,7 @@ upperLabel: {
       color: 'text.secondary',
     }}
   >
-    Genome Size
+    Genome Size (bp; assembly summaries)
   </Typography>
 
   <Box
@@ -806,7 +729,6 @@ upperLabel: {
                 style={{ width: '100%', height: '100%' }}
                 option={treemapOption}
                 notMerge={true}                // <-- σημαντικό
-                replaceMerge={['series']}      // <-- προαιρετικά, βοηθάει
               />
 
             </Box>

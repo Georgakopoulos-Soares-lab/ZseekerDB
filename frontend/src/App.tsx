@@ -1,3 +1,4 @@
+import { useCallback, useState } from 'react'
 import { Routes, Route, Navigate, Link as RouterLink } from 'react-router-dom'
 import { Container, Paper, Typography, Button } from '@mui/material'
 import AppShell from './layout/AppShell'
@@ -14,14 +15,16 @@ import HomeInsights from './pages/HomeInsights'   // <-- new import
 import AdditionalTools from './pages/AdditionalTools'
 
 function Home() {
+  const [counts, setCounts] = useState<{ assemblies: number; predictions: number } | null>(null);
+  const onCounts = useCallback((assemblies: number, predictions: number) => setCounts({ assemblies, predictions }), []);
   return (
     <Container maxWidth="lg">
       <Paper elevation={1} sx={{ p: 3 }}>
         <Typography variant="h4" fontWeight={800} gutterBottom>ZSeekerDB</Typography>
         <Typography paragraph>
-          ZSeekerDB is a large-scale, comprehensive database cataloging predicted Z-DNA and Z-RNA sequences across all major branches of life. 
-          It provides interactive search, visualization, and download options, enabling independent exploration of Z-nucleic acid data. 
-          The current release includes over 280,000 genome assemblies and more than 850 million predicted Z-forming sequences. 
+          ZSeekerDB is a large-scale database cataloging sequence-based predictions of Z-forming potential across organismal and viral genomes.
+          It provides interactive search, visualization, and download options for predicted loci.
+          {counts && ` The database includes ${counts.assemblies.toLocaleString()} genome assemblies and ${counts.predictions.toLocaleString()} predicted loci. `}
           ZSeekerDB fills a long-standing gap between experimental discoveries and comparative genomics of non-B DNA structures.
         </Typography>
 
@@ -51,12 +54,12 @@ function Home() {
             </Typography>
           </li>
         </ul>
-        
+
         <Button component={RouterLink} to="/explore" variant="contained">Start exploring</Button>
       </Paper>
 
       {/* NEW: quick insights charts under the welcome card */}
-      <HomeInsights />
+      <HomeInsights onCounts={onCounts} />
     </Container>
   );
 }

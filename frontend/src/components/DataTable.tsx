@@ -52,11 +52,6 @@ const LABELS: Record<string, string> = Object.fromEntries(
   METADATA_COLUMNS.map(col => [col.dbName, col.label])
 );
 
-// Create a map for default visibility
-const DEFAULT_VISIBILITY: Record<string, boolean> = Object.fromEntries(
-  METADATA_COLUMNS.map(col => [col.dbName, !col.hidden])
-);
-
 const EMPTY_DISPLAY = '-';
 
 function QuickToolbar() {
@@ -113,7 +108,7 @@ export default function DataTable({ rows, columns, visible, height = 480 }: Prop
         sortable: true,
         minWidth: 140,
         // πραγματική τιμή για filtering / sorting
-        valueGetter: (params) => params.row?.[field],
+        valueGetter: (_value, row) => row?.[field],
         // εμφάνιση: δείξε "-" αν είναι κενό
         renderCell: (params) => {
           const v = params.value;

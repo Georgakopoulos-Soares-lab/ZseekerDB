@@ -56,10 +56,6 @@ type Ranges = {
   gc_percent_max: number | '';
 };
 
-// Case-insensitive finder on an array of column strings
-const findCol = (cols: string[], nameLower: string) =>
-  cols.find((c) => c.toLowerCase() === nameLower) ?? null;
-
 // Build a simple histogram (equal bins)
 function buildHistogram(values: number[], binCount = 20) {
   const v = values.filter((x) => Number.isFinite(x));
@@ -815,6 +811,10 @@ const histGenomeBottom = useMemo(
   return (
     <Box sx={{ p: 2 }}>
       <Typography variant="h6" sx={{ mb: 2 }}>Species browser</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+        This browser lists assemblies with predictions and genome size of at least 1,000 bp.
+        Homepage counts include all assemblies, including those without predictions.
+      </Typography>
 
       {/* TOP BAR */}
       <Paper
