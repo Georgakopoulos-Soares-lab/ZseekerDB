@@ -80,17 +80,18 @@ const AboutDoc: FC = () => {
         <Grid>
           <Card>
             <Typography sx={{ color: 'text.secondary' }}>
-              ZSeekerDB is an open, cross-species resource for discovering and comparing candidate Z-DNA and Z-RNA loci
-              across organismal and viral genomes. It combines the ZSeeker prediction framework with an analysis-oriented
+              ZSeekerDB is an open, cross-species resource for discovering and comparing candidate Z-DNA loci
+              across organismal genomes. It combines the ZSeeker prediction framework with a versioned, analysis-oriented
               backend and a modern web interface to support rigorous, reproducible analyses.
             </Typography>
           </Card>
         </Grid>
 
-        <Grid size={12}>
+        <Grid>
           <Card title="Dataset provenance"><DatasetProvenance /></Card>
         </Grid>
-        <Grid size={12}>
+
+        <Grid>
           <Card title="Prediction scope">
             <Typography color="text.secondary">
               These records describe sequence-based Z-forming potential. RNA-virus genomes are
@@ -98,12 +99,13 @@ const AboutDoc: FC = () => {
             </Typography>
           </Card>
         </Grid>
-        <Grid size={12}>
+
+        <Grid>
           <Card title="Mission">
             <Typography color="text.secondary">
               Our mission is to make high-quality Z-form annotations broadly accessible to researchers in genomics,
               structural biology and immunology, and to support experimental prioritization with transparent methods,
-              rich metadata and reproducible data.
+              rich metadata and stable releases.
             </Typography>
           </Card>
         </Grid>
