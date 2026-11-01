@@ -41,6 +41,7 @@ type Config struct {
 	CORSOrigins    []string
 	TrustedProxies []string
 	AdminToken     string
+	MetadataGlob   string
 }
 
 func loadConfig() (*Config, error) {
@@ -57,6 +58,7 @@ func loadConfig() (*Config, error) {
 	cfg.DBPath = get("DUCKDB_PATH", "data/zdnadatabase.duckdb")
 	cfg.StaticDir = get("STATIC_DIR", "frontend/dist")
 	cfg.AdminToken = get("ADMIN_TOKEN", "")
+	cfg.MetadataGlob = get("METADATA_GLOB", "data/metadata.tsv.gz")
 	cfg.TempDir = get("DUCKDB_TEMP_DIR", "data/tmp")
 	if p, err := strconv.Atoi(get("DUCKDB_MAX_TEMP_GIB", "50")); err == nil {
 		cfg.MaxTempGiB = p
@@ -148,13 +150,13 @@ func openDuckDB(cfg *Config) (*sql.DB, error) {
 		names = append(names, n)
 	}
 	rows.Close()
-	if _, err := db.Exec(`CREATE VIEW metadata AS SELECT m.*, a.species_taxid FROM zdb.main.metadata m JOIN zdb.main.metadata_all a USING (assembly)`); err != nil {
+	if err := initializeMetadata(db, cfg, names); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("loading final database metadata: %w", err)
+		return nil, fmt.Errorf("loading assembly metadata: %w", err)
 	}
 	for _, n := range names {
 		// Add species grouping IDs to the browser projection; keep the stored schema intact.
-		if n == "metadata" {
+		if n == "metadata" || n == "metadata_all" {
 			continue
 		}
 		src := "SELECT * FROM zdb.main." + quoteIdent(n)

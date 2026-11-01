@@ -288,14 +288,22 @@ shares the same rate limit.
 The Docker image builds React and serves it from Go in one Railway service.
 The runtime always attaches the verified database read-only and exposes its
 tables through in-memory views. Browser metadata adds `species_taxid` from
-`metadata_all`; the stored schema and source chromosome coordinates are preserved. Mount a volume at `/data`, place the verified database at
+`metadata_all` when the browser table does not already contain it. Mount a volume at `/data`, place the verified database at
 `/data/zdnadatabase.duckdb`, and set `DUCKDB_PATH` accordingly. `PORT` is supplied
 by Railway. Optional `CORS_ORIGIN` is a comma-separated origin list.
 
 Without the database the service starts with degraded health and data routes
 return 503; restart after installing the file. Runtime data files are excluded
-from Git. The checked-in `data/metadata.tsv.gz` is not the runtime metadata source.
-Pass the final assembly attributes explicitly through `MIG_META_TSV` for builds.
+from Git. If the mounted database contains `metadata` without `metadata_all`,
+the runtime reads complete assembly attributes from `METADATA_GLOB` (default
+`data/metadata.tsv.gz`, included in the Docker image). It creates `metadata_all`
+in memory, retains assemblies with zero predictions, takes prediction counts
+from the mounted `data_top_asm` table and observed base totals from its metadata,
+and computes densities using `genome_size`. TSV prediction summaries are ignored.
+Assembly coverage and prediction totals must match the mounted database before
+initialization succeeds. The volume is never modified. Databases with their own
+`metadata_all` use it directly and need no external metadata file.
+Pass assembly attributes explicitly through `MIG_META_TSV` for builds.
 
 ```bash
 cd backend && go test ./...
