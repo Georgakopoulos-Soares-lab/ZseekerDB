@@ -7,8 +7,8 @@ scored as cDNA sequences; these scores are not experimental validation of Z-RNA
 formation.
 
 [Open the portal](https://zseeker-db.com/) ·
-[Build and export documentation](scripts/migrate/README.md) ·
-[Reproduce the scientific figures](scripts/analysis/README.md)
+[Database build documentation](scripts/migrate/README.md) ·
+[Dataset construction and figure scripts](scripts/benchmarking/)
 
 ## Verified catalog
 
@@ -35,10 +35,10 @@ assembly/strain `ncbi_summary_taxid`. The metadata includes assemblies with no
 predictions, and the Species Browser lists every assembly with
 `genome_size_manual` of at least 1,000 bp, including those without predictions.
 
-The final assembly-metadata TSV has SHA-256
-`2a67abe869d6ae5a88843ae98ff0e3ac966322cc2a2091bf51d01926f9ed051e`.
+The assembly-metadata file in this repository, `data/metadata.tsv.gz`, has
+SHA-256 `a8a6fdda522f8e76770afc7646f2a9e2d5ddc8b63e76744fbffa217a85617e25`.
 
-## Dataset downloads and reconstruction
+## Dataset downloads
 
 The **October 2026 datasets are public on Zenodo**: 23 downloadable archives
 in 14 open records, published 26 October 2026. Every direct link below returned
@@ -65,50 +65,35 @@ archives for their assembly attributes and counts.
 **Archived BED coordinates:** the published four-column files contain chromosome,
 start, native inclusive end and raw ZSeeker score. A checked locus is
 `CP115555.1:605–655` (51 bp); for standard half-open BED it must be `605–656`.
-Add one to the end before using these archived BED files with BED tools. The
-repository's `export_release.py` already performs this conversion and writes
-assembly/score names when generating BED4. Archived chromosome accessions are
-preserved; only the portal names human chromosomes 1–22, X, Y (see below).
-
-### Reconstruction from repository-generated exports
-
-To rebuild the verified catalog from Parquet exports produced by this repository,
-unpack exactly one copy of each shard and use its matching final metadata TSV:
-
-```bash
-python3 -m pip install -r scripts/migrate/requirements.txt
-python3 scripts/migrate/import_release.py '/path/to/unpacked/**/*.parquet' /path/to/assembly_metadata.tsv /path/to/new.duckdb
-```
-
-The importer restores native human chromosome accessions, rebuilds derived
-tables and runs the database verifier. It refuses to overwrite an existing
-database. See the [build documentation](scripts/migrate/README.md) for the source
-CSV pipeline, export commands and checksum manifest.
+Add one to the end before using these archived BED files with BED tools.
+Archived chromosome accessions are preserved; only the portal names human
+chromosomes 1–22, X, Y (see below).
 
 ## Database design
 
-`assembly` is the join key between predictions and assembly metadata. NCBI
-accessions retain their version suffix (for example `GCF_009914755.1`). The source
-TSV supplies assembly attributes. Its prediction summary fields can be stale;
-the final build recomputes counts, predicted bases and density from `data`.
+The database file `zdnadatabase_2026-10.duckdb` is built by `scripts/migrate`
+(see [Data pipeline](#data-pipeline)). `assembly` is the join key between
+predictions and assembly metadata. NCBI accessions retain their version suffix
+(for example `GCF_009914755.1`).
 
 | Object | Purpose |
 | --- | --- |
-| `data` | One row per predicted locus, stored with native chromosome accession |
-| `metadata_all` | One row per input assembly, including assemblies without predictions |
-| `metadata` | Browser subset, by default `obs_n_zdna > 0`; legacy field layout |
-| `chromosomes` | Distinct chromosome accessions from `data` |
-| `tax_names` | Distinct `metadata.tax_name` values with genome size ≥1,000 bp |
+| `data` | One row per predicted locus (2,563,977,897), stored with native chromosome accession |
+| `metadata` | One row per assembly with predictions (148,215), built from the release TSV |
+| `chromosomes` | Distinct chromosome accessions with predictions (5,042,470) |
+| `tax_names` | Distinct `tax_name` values of assemblies with predictions and `genome_size` ≥1,000 bp (63,500) |
 | `data_kpis` | Prediction-wide aggregate statistics |
 | `data_top_asm` | Prediction counts grouped by assembly |
 | `data_top_chrom` | Prediction counts grouped by chromosome accession |
-| `zdna` | Projection of `data`, exposing `assembly` as `Assembly` |
-| `metadata_view` | Display-name projection of `metadata`, restricted to genome size ≥1,000 bp |
+| `zdna` | View: projection of `data`, exposing `assembly` as `Assembly` |
+| `metadata_view` | View: display-name projection of `metadata`, restricted to `genome_size` ≥1,000 bp |
 
-Views are ordinary SQL views, not materialized joins. The API uses `data` and
-`metadata` directly for most searches. Homepage counts and balanced summaries
-use `metadata_all`, with no minimum genome-size filter on counts. This avoids
-excluding small viral genomes or assemblies with no predictions.
+The DuckDB `metadata` table holds only assemblies with predictions. The portal
+therefore does not query it: at startup it loads the complete assembly metadata,
+`data/metadata.tsv.gz` (all 324,198 assemblies, including the 175,983 without
+predictions), into an in-memory `metadata` table that replaces it. All homepage
+counts, the Species browser, Species insights and Sequence search use this
+complete table; assemblies without predictions report 0 predictions.
 
 ## Field-level schema
 
@@ -136,19 +121,20 @@ source accession names.
 
 ### Assembly metadata
 
-`metadata_all` contains the following fields. `metadata` has the same fields
-except `species_taxid`, preserving the existing browser schema. Empty text
-becomes SQL NULL; failed numeric conversions become NULL, not zero.
+The portal's `metadata` table is loaded from `data/metadata.tsv.gz` with the
+fields below. Empty text becomes SQL NULL (`na` too, for `infraspecific_name`
+and `paired_asm_comp`); failed numeric conversions become NULL, not zero.
+Taxonomy fields come from `scripts/benchmarking/06_add_taxonomy.py`; prediction
+summaries from `scripts/benchmarking/08_z_density.py`.
 
 | Field | Type | TSV source / definition |
 | --- | --- | --- |
-| `assembly` | VARCHAR | `assembly`; unique accession, including assembly version |
-| `bioproject` | VARCHAR | NULL when absent from the supplied TSV |
-| `biosample` | VARCHAR | NULL when absent from the supplied TSV |
-| `taxid` | BIGINT | `ncbi_summary_taxid` or `ncbi_taxid`; may identify a strain |
-| `species_taxid` | BIGINT | `ncbi_summary_species_taxid` or `ncbi_species_taxid`; species grouping key |
+| `assembly` | VARCHAR | `assembly_accession`; unique accession, including assembly version |
+| `taxid` | BIGINT | `ncbi_summary_taxid`; may identify a strain |
+| `species_taxid` | BIGINT | `ncbi_summary_species_taxid`; species grouping key |
 | `assembly_level` | VARCHAR | `resolve_level`; complete → Complete Genome, chromosome → Chromosome |
-| `genome_size` | BIGINT | `genome_size`, bp; not substituted with `genome_size_manual` |
+| `genome_size_manual` | BIGINT | bp, computed from the FASTA as total bases minus N stretches (`04_genome_size.sh`); the genome size used throughout the portal |
+| `genome_size_ungapped` | BIGINT | `genome_size_ungapped`, bp, as reported by NCBI |
 | `gc_percent` | DOUBLE | `gc_percent`, percentage points (0–100) |
 | `superkingdom` | VARCHAR | `superkingdom`; e.g. Eukaryota |
 | `kingdom` | VARCHAR | `kingdom`; e.g. Metazoa |
@@ -158,12 +144,21 @@ becomes SQL NULL; failed numeric conversions become NULL, not zero.
 | `family` | VARCHAR | `family`; e.g. Hominidae |
 | `genus` | VARCHAR | `genus`; e.g. Homo |
 | `tax_name` | VARCHAR | `tax_name`; source taxon label, e.g. Homo sapiens |
-| `is_t2t` | BOOLEAN | Filename contains T2T; filename heuristic, not independent completeness validation |
-| `viral_realm` | VARCHAR | `viral_realm`; supplied upstream |
-| `updated_tax_name` | VARCHAR | `updated_tax_name`; supplied upstream |
-| `obs_zbp` | BIGINT | Sum of actual locus sequence lengths, predicted bases (bp); source TSV field `Z-DNA/-RNA bases count` is replaced during the final build |
-| `obs_density_per_kb` | DOUBLE | `obs_zbp * 1000 / genome_size`; predicted bp per 1,000 genome bp; NULL if genome size is unavailable or nonpositive |
-| `obs_n_zdna` | BIGINT | Actual number of prediction rows; source TSV field `Z-DNA/-RNA predictions count` is replaced during the final build |
+| `species` | VARCHAR | `species` |
+| `organism_name` | VARCHAR | `organism_name`, as in the NCBI assembly summary |
+| `infraspecific_name` | VARCHAR | `infraspecific_name` |
+| `viral_realm` | VARCHAR | `viral_realm` |
+| `updated_tax_name` | VARCHAR | `updated_tax_name` |
+| `replicon_count`, `scaffold_count`, `contig_count` | BIGINT | as reported by NCBI |
+| `reference_genome` | BOOLEAN | `reference_genome` |
+| `paired_asm_comp` | VARCHAR | `paired_asm_comp` |
+| `obs_n_zdna` | BIGINT | `z_predictions_count`; number of predicted loci |
+| `obs_zbp` | BIGINT | `total_z_bases`; bases covered by predicted loci, overlapping loci merged |
+| `obs_density_per_kb` | DOUBLE | `z_density` × 1,000; predicted bp per 1,000 bp of `genome_size_manual` |
+
+The DuckDB `metadata` table has the same fields plus `genome_size` (the NCBI
+reported size), `is_t2t` (T2T in the source filename) and `has_gff`, for the
+148,215 assemblies with predictions.
 
 Additional source TSV attributes are retained in the archived TSV, not silently
 promoted to queryable fields. Taxonomy normalization, including the Protists and viral-realm assignments, is reproduced by scripts/benchmarking/06_add_taxonomy.py All supplied taxon labels are retained.
@@ -177,10 +172,11 @@ promoted to queryable fields. Taxonomy normalization, including the Protists and
 | `data_kpis` | `total_sites BIGINT`, `distinct_chr BIGINT`, `avg_score DOUBLE`, `min_score DOUBLE`, `max_score DOUBLE`, `avg_seq_len DOUBLE`, `distinct_asm BIGINT`, `computed_at TIMESTAMP WITH TIME ZONE` |
 | `data_top_asm`, `data_top_chrom` | `k VARCHAR` (assembly or chromosome), `c BIGINT` (locus count) |
 
-`metadata_view` exposes `assembly`, `bioproject`, `biosample`, `T2T`, `Genome size`,
+`metadata_view` exposes `assembly`, `T2T`, `Genome size` (from `genome_size`),
 `Taxon ID`, `GC content (%)`, all eight taxonomic name/rank fields,
-`Viral realm`, `Infraspecific name`, `Z-DNA bps`, `Z-DNA density (per kb)`,
-and `Number of predicrions` (legacy spelling). Types are inherited unchanged.
+`Viral realm`, `Infraspecific name` (legacy name for `updated_tax_name`),
+`Z-DNA bps`, `Z-DNA density (per kb)`, and `Number of predicrions` (legacy
+spelling). Types are inherited unchanged.
 
 ## Summary statistics
 
@@ -209,47 +205,67 @@ assemblies, otherwise it runs to the last predicted base (`MAX(End) + 1`).
 
 ## Data pipeline
 
-Use **DuckDB 1.1.3**, matching **go-duckdb 1.8.5**, for database-file compatibility.
-The application does not currently use the experimental two-bit sequence codec.
+### Dataset construction (`scripts/benchmarking`)
 
-1. `scripts/migrate/audit.py`: compare source CSV assembly identifiers with the TSV.
-2. `build_data.py`: ingest sorted per-assembly CSV files in byte-bounded atomic
-   batches. `_ingest_state` records the committed file prefix for resume. The
-   input directory and ordering must remain unchanged during a resumed build.
-   Placeholder rows with missing chromosome, coordinates, score or sequence,
-   invalid intervals or inconsistent sequence length are excluded.
-3. `build_meta_stats.py`: build `metadata_all`, recompute observed locus counts,
-   predicted bases and densities from `data`, then rebuild the browser `metadata` subset,
-   auxiliary tables, aggregates and views. Existing nonempty objects are reused;
-   set `MIG_FORCE=1` to rebuild derived objects. It does not rewrite `data`.
-4. `verify.py`: check field types, join integrity, actual data counts and the
-   SQL used by portal endpoints. A failed verification exits nonzero.
+1. `01_download_ncbi.sh`: NCBI assembly summaries (GenBank and RefSeq) and the
+   NCBI taxonomy dump.
+2. `02_select_assemblies.py`: select assemblies from the summaries (all
+   Complete Genome assemblies, plus chromosome-level reference genomes for
+   taxids without one; see the script for the full criteria).
+3. `03_download_genomes.sh`: download and verify the genome FASTA files.
+4. `04_genome_size.sh`: `genome_size_manual`, total bases minus N stretches.
+5. `05_filter_dedup.py`: filter assembly types and groups, and remove
+   GenBank/RefSeq duplicates.
+6. `06_add_taxonomy.py`: NCBI ranked lineage, superkingdom, viral realm and
+   Protists assignments.
+7. `07_run_zseeker.sh`: run ZSeeker on every assembly, one CSV per assembly.
+8. `08_z_density.py`: per-assembly locus counts, covered bases (overlapping
+   loci merged) and `z_density = z_bases / genome_size_manual`.
 
-`release.py` provides a metadata-only rebuild, without copying billions of
-prediction rows. It accepts both `ncbi_*` and `ncbi_summary_*` TSV taxid names,
-validates unique assembly keys, and replaces both metadata tables atomically.
-Set `MIG_RECOMPUTE_OBSERVED=1` when refreshing metadata against an existing
-prediction table; this scans `data` to replace stale TSV prediction summaries.
-The default `MIG_DROP_EMPTY_ASSEMBLIES=1` affects `metadata` only. `metadata_all`
-always keeps the entire input TSV.
+Scripts 09–16 produce the manuscript analyses: genome and locus dinucleotide
+composition (09–11, Figure 6A–D statistics), comparison with nBMST predictions
+on the human and mouse T2T assemblies (12–13), the Rps6kl1 locus in the mouse
+T2T assembly (14–15), and the Figure 6 plots (16).
+
+### Database build (`scripts/migrate`)
+
+Use **DuckDB 1.1.3**, matching **go-duckdb 1.8.5**, for database-file
+compatibility. Inputs are the per-assembly ZSeeker CSVs
+(`all_zseeker_final.tar.gz`) and the 31-column release TSV with 324,198
+assemblies (`MIG_META_TSV`).
+
+- Placeholder rows that ZSeeker writes for sequences without predictions
+  (`Chromosome,,,,`; 24,116,216 rows) are dropped, so `data` holds real
+  predictions only.
+- Assemblies without predictions are dropped from the DuckDB `metadata` table
+  (`MIG_DROP_EMPTY_ASSEMBLIES=1`, default): 175,983 of 324,198, leaving
+  148,215. The portal restores them from the complete TSV at runtime.
+- TSV to DB mapping: `assembly_accession` → `assembly`, `ncbi_summary_taxid` →
+  `taxid`, `resolve_level` → `assembly_level`, `z_predictions_count` →
+  `obs_n_zdna`, `total_z_bases` → `obs_zbp`, `z_density` × 1,000 →
+  `obs_density_per_kb`; `is_t2t` is "T2T" in the source filename.
+- `chromosomes` and `tax_names` list only chromosomes and species with
+  predictions.
+
+This release was built incrementally with `rebuild_release.py
+[data|metadata|derived]`, which copies `data` from the July build with the
+rules above and rebuilds `metadata` and the derived tables. A build from
+scratch extracts the tarball to `build/csv` and runs `run_all.sh` (`audit.py` →
+`build_data.py` → `build_meta_stats.py` → `verify.py`). Both share the
+metadata, derived-table and view SQL in `release.py`. Paths and tunables are set
+in `scripts/migrate/common.py` and its `MIG_*` environment variables.
+
+`verify.py [db]` opens the database read-only and checks the schema, the absence
+of NULL and placeholder rows, per-assembly counts and bases against `metadata`,
+orphans in both directions, density units, and a replay of the endpoint and
+frontend SQL. It exits non-zero on any failure. The two-bit sequence codec
+(`seqcodec.py`) was a space-reduction experiment and is not used; `Sequence`
+is stored as VARCHAR.
 
 ```bash
-python3 -m pip install -r scripts/migrate/requirements.txt
-export MIG_ROOT=/path/to/ZSeekerDB_migration
-export MIG_DB_PATH="$MIG_ROOT/zdnadatabase.duckdb"
-export MIG_META_TSV="$MIG_ROOT/zseeker_db_assembly_all_metadata.tsv"
-export MIG_CSV_DIR="$MIG_ROOT/build/csv"
-MIG_RECOMPUTE_OBSERVED=1 python3 scripts/migrate/release.py
-python3 scripts/migrate/verify.py
+python3 scripts/migrate/verify.py /path/to/zdnadatabase_2026-10.duckdb
 python3 -m pytest scripts/migrate/tests/ -q
 ```
-
-A source-archive inventory can be generated without extraction:
-`python3 scripts/migrate/audit_archive.py all_zseeker_final.tar.gz inventory.csv`.
-It counts records and small-file placeholders, not every row's validity.
-Reconcile the inventory, input TSV and built DB before publishing totals or
-rewriting manuscript statistics. Recomputing a prediction table does not
-recompute scientific figures, correlations or supplementary analyses.
 
 ## Web interface and implementation
 

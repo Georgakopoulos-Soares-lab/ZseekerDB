@@ -299,7 +299,7 @@ const files: ArchiveFile[] = [
 export const archive = {
   buildDate: '2026-10-27', assemblies: 324198, predictions: 2563977897,
   speciesTaxids: 60841, predictionBearingAssemblies: 148215,
-  metadataSha256: '2a67abe869d6ae5a88843ae98ff0e3ac966322cc2a2091bf51d01926f9ed051e',
+  metadataSha256: 'a8a6fdda522f8e76770afc7646f2a9e2d5ddc8b63e76744fbffa217a85617e25',
   verifiedAt: '2026-11-01',
   publishedAssemblies: 324198, publishedPredictions: 2563977897,
   records, files,
