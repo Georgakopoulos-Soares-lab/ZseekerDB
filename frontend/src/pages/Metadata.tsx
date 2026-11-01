@@ -56,6 +56,8 @@ async function distinct(field: string, upper: Record<string, string> = {}) {
 type Ranges = {
   genome_size_min: number | '';
   genome_size_max: number | '';
+  genome_size_ungapped_min: number | '';
+  genome_size_ungapped_max: number | '';
   gc_percent_min: number | '';
   gc_percent_max: number | '';
 };
@@ -105,7 +107,7 @@ const COL_ALIASES: Record<string, string[]> = {
   obs_density_per_kb: ['zdna_density', 'Z-DNA density (per kb)'],
   // others that charts use
   gc_percent: ['GC content (%)'],
-  genome_size: ['Genome size'],
+  genome_size_manual: ['Genome size'],
   genus: ['Genus'],
   superkingdom: ['Superkingdom'],
   tax_name: ['Specie', 'Species'],
@@ -219,6 +221,8 @@ export default function MetadataPage() {
   const [rng, setRng] = useState<Ranges>({
     genome_size_min: 1000,
     genome_size_max: '',
+    genome_size_ungapped_min: '',
+    genome_size_ungapped_max: '',
     gc_percent_min: '',
     gc_percent_max: '',
   });
@@ -456,6 +460,8 @@ export default function MetadataPage() {
     setRng({
       genome_size_min: '',
       genome_size_max: '',
+      genome_size_ungapped_min: '',
+      genome_size_ungapped_max: '',
       gc_percent_min: '',
       gc_percent_max: '',
     });
@@ -702,7 +708,7 @@ export default function MetadataPage() {
     grid: { left: 85, right: 30, top: 20, bottom },
   }) as echarts.EChartsOption, [axisTextColor, strongAxisLine, gridLineColor]);
 
-  // 3) Genome size histogram (genome_size, mean per species taxid)
+  // 3) Genome size histogram (genome_size_manual, mean per species taxid)
   const histGenome = useMemo(
     () => genomeSizeHistogram(scatterData.map(p => p.size)),
     [scatterData]
@@ -766,10 +772,6 @@ export default function MetadataPage() {
   return (
     <Box sx={{ p: 2 }}>
       <Typography variant="h6" sx={{ mb: 2 }}>Species browser</Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        This browser lists assemblies with predictions and genome size of at least 1,000 bp.
-        Homepage counts include all assemblies, including those without predictions.
-      </Typography>
 
       {/* TOP BAR */}
       <Paper
@@ -871,6 +873,13 @@ export default function MetadataPage() {
               max={rng.genome_size_max}
               onMinChange={(v) => setRng((s) => ({ ...s, genome_size_min: v })) }
               onMaxChange={(v) => setRng((s) => ({ ...s, genome_size_max: v })) }
+            />
+            <RangeFilter
+              label="Genome Size (Ungapped)"
+              min={rng.genome_size_ungapped_min}
+              max={rng.genome_size_ungapped_max}
+              onMinChange={(v) => setRng((s) => ({ ...s, genome_size_ungapped_min: v })) }
+              onMaxChange={(v) => setRng((s) => ({ ...s, genome_size_ungapped_max: v })) }
             />
             <RangeFilter
               label="GC Percent"

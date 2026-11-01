@@ -28,12 +28,9 @@ import { runSQL } from '../utils/sql';
 import type { ChartParam } from '../utils/chartTypes';
 import { COUNT_TICKS, LENGTH_TICKS, SCORE_TICKS, linearTicks, tickPosition, ticksUpTo } from '../utils/tickScale';
 
-import { toDisplay, chromosomeWhere, chromosomeSort, chromosomePrefixWhere } from '../utils/chromosomes';
-
 /* ------------------------------- Types/Helpers ------------------------------ */
 
 type Row = {
-  assembly?: string;
   Chromosome: string;
   Start: number;
   End: number;
@@ -41,11 +38,7 @@ type Row = {
   Sequence: string;
 };
 
-type KV = { label: string; assembly?: string };
-
-function displayRow({ assembly, ...row }: Row): Row {
-  return { ...row, Chromosome: toDisplay(row.Chromosome, assembly) };
-}
+type KV = { label: string };
 
 type ChrStat = {
   assembly: string;
@@ -276,7 +269,7 @@ export default function Explorer() {
     let dead = false;
     const where = lockedAssembly
       ? `assembly = ${q(lockedAssembly)}`
-      : `genome_size >= 1000 AND tax_name = ${q(species!)}`;
+      : `genome_size_manual >= 1000 AND tax_name = ${q(species!)}`;
     runSQL<{ n: number }>(`SELECT COALESCE(SUM(obs_n_zdna), 0) AS n FROM metadata WHERE ${where}`)
       .then(r => { if (!dead) setContextPredictions(Number(r[0]?.n ?? 0)); })
       .catch(() => { if (!dead) setContextPredictions(null); });
@@ -300,10 +293,10 @@ export default function Explorer() {
 
     // All species in the release metadata, including those without predictions
     const sql = `
-      SELECT DISTINCT tax_name AS label
-      FROM metadata
-      WHERE genome_size >= 1000 AND lower(tax_name) LIKE ${q(prefix.toLowerCase() + '%')}
-      ORDER BY 1
+      SELECT DISTINCT tax_name AS label 
+      FROM metadata 
+      WHERE genome_size_manual >= 1000 AND lower(tax_name) LIKE ${q(prefix.toLowerCase() + '%')} 
+      ORDER BY 1 
       LIMIT ${AUTOCOMPLETE_LIMIT}
     `;
 
@@ -356,24 +349,21 @@ export default function Explorer() {
         if (lockedAssembly) {
           where = `assembly = ${q(lockedAssembly)}`;
         } else {
-          where = `assembly IN (SELECT assembly FROM metadata WHERE genome_size >= 1000 AND tax_name = ${q(species!)})`;
+          where = `assembly IN (SELECT assembly FROM metadata WHERE genome_size_manual >= 1000 AND tax_name = ${q(species!)})`;
         }
 
-        const andPrefix = prefix ? `AND ${chromosomePrefixWhere(prefix)}` : '';
+        const andPrefix = prefix ? `AND lower("Chromosome") LIKE ${q(prefix + '%')}` : '';
         const sql = `
-          SELECT DISTINCT "Chromosome" AS label, assembly
+          SELECT DISTINCT "Chromosome" AS label
           FROM data
           WHERE ${where} ${andPrefix}
           LIMIT ${AUTOCOMPLETE_LIMIT}
         `;
         const opts = await runSQL<KV>(sql);
-
+        
         // Apply natural sort to chromosome options
-        const mapped = opts.filter(o => o.label.toLowerCase().startsWith(prefix) || toDisplay(o.label, o.assembly).toLowerCase().startsWith(prefix))
-          .map(o => ({ label: toDisplay(o.label, o.assembly) }));
-        const sorted = Array.from(new Set(mapped.map(o => o.label)))
-          .sort(chromosomeSort).map(label => ({ label }));
-
+        const sorted = opts.sort((a, b) => naturalSort(a.label, b.label));
+        
         if (!dead) setChrOpts(sorted);
       } finally {
         if (!dead) setLoadingChr(false);
@@ -387,10 +377,10 @@ export default function Explorer() {
     const parts: string[] = [];
     if (!species && !lockedAssembly) return '1=0';
 
-    if (species)        parts.push(`assembly IN (SELECT assembly FROM metadata WHERE genome_size >= 1000 AND tax_name = ${q(species)})`);
+    if (species)        parts.push(`assembly IN (SELECT assembly FROM metadata WHERE genome_size_manual >= 1000 AND tax_name = ${q(species)})`);
     if (lockedAssembly) parts.push(`assembly = ${q(lockedAssembly)}`);
 
-    if (chr) parts.push(chromosomeWhere(chr, lockedAssembly));
+    if (chr) parts.push(`"Chromosome" = ${q(chr)}`);
     if (startMin) parts.push(`"Start" >= ${Number(startMin)}`);
     if (startMax) parts.push(`"Start" <= ${Number(startMax)}`);
     if (endMin)   parts.push(`"End"   >= ${Number(endMin)}`);
@@ -405,16 +395,13 @@ export default function Explorer() {
   }, [species, lockedAssembly, chr, startMin, startMax, endMin, endMax, scoreMin, scoreMax, contains]);
 
   /* --------------------------------- Results SQL -------------------------------- */
-  const rowsRequest = useRef(0);
-  const invalidateRows = useCallback(() => { rowsRequest.current++; }, []);
   async function fetchRowsAndCount(p = page, size = rpp) {
-    const request = ++rowsRequest.current;
     if (!hasQueryContext) return;
     setLoading(true);
     const offset = p * size;
 
     const sqlRows = `
-      SELECT "Chromosome","Start","End","Z-DNA Score" AS Score,"Sequence",assembly
+      SELECT "Chromosome","Start","End","Z-DNA Score" AS Score,"Sequence"
       FROM data
       WHERE ${whereSql}
       ORDER BY "Z-DNA Score" DESC
@@ -430,11 +417,10 @@ export default function Explorer() {
         runSQL<Row>(sqlRows),
         runSQL<{ n: number }>(sqlCount),
       ]);
-      if (request !== rowsRequest.current) return;
-      setRows(r.map(displayRow));
+      setRows(r);
       setTotal(Number(getVal(c?.[0], 'n') ?? 0));
     } finally {
-      if (request === rowsRequest.current) setLoading(false);
+      setLoading(false);
     }
   }
 
@@ -444,7 +430,6 @@ export default function Explorer() {
     if (tab === 'viz') fetchViz();
   }
   function onReset() {
-    rowsRequest.current++;
     setChr(null); setChrInput('');
     setStartMin(''); setStartMax('');
     setEndMin('');   setEndMax('');
@@ -454,9 +439,8 @@ export default function Explorer() {
   }
 
   useEffect(() => {
-    if (!hasQueryContext) { setRows([]); setTotal(0); setLoading(false); return; }
+    if (!hasQueryContext) return;
     fetchRowsAndCount(page, rpp);
-    return invalidateRows;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, rpp, whereSql, hasQueryContext]);
 
@@ -474,7 +458,7 @@ export default function Explorer() {
     }
 
     const selectSql = `
-      SELECT "Chromosome","Start","End","Z-DNA Score" AS Score,"Sequence",assembly
+      SELECT "Chromosome","Start","End","Z-DNA Score" AS Score,"Sequence"
       FROM data
       WHERE ${whereSql}
       ORDER BY "Z-DNA Score" DESC
@@ -485,7 +469,7 @@ export default function Explorer() {
     while (offset < totalRows) {
       const batchSql = `${selectSql} LIMIT ${BATCH_EXPORT} OFFSET ${offset}`;
       const part = await runSQL<Row>(batchSql);
-      all.push(...part.map(displayRow));
+      all.push(...part);
       offset += BATCH_EXPORT;
       if (offset >= MAX_EXPORT_ROWS) break;
     }
@@ -510,12 +494,11 @@ export default function Explorer() {
   const [vizLoading, setVizLoading] = useState(false);
   const [viz, setViz] = useState<VizData | null>(null);
   const vizRequest = useRef(0);
-  const invalidateViz = useCallback(() => { vizRequest.current++; }, []);
 
   // Species / assembly part of the WHERE clause only (no user filters).
   const contextWhere = useMemo(() => {
     if (lockedAssembly) return `assembly = ${q(lockedAssembly)}`;
-    if (species) return `assembly IN (SELECT assembly FROM metadata WHERE genome_size >= 1000 AND tax_name = ${q(species)})`;
+    if (species) return `assembly IN (SELECT assembly FROM metadata WHERE genome_size_manual >= 1000 AND tax_name = ${q(species)})`;
     return '1=0';
   }, [species, lockedAssembly]);
 
@@ -529,7 +512,7 @@ export default function Explorer() {
       // keep only the top and lowest VIZ_CHROMOSOME_EDGE by site count.
       const sqlChrStats = `
         SELECT * FROM (
-        SELECT s.*, COUNT(*) OVER (PARTITION BY s.assembly) AS scaffolds, m.genome_size AS gsize, COUNT(*) OVER () AS total,
+        SELECT s.*, m.scaffold_count AS scaffolds, m.genome_size_manual AS gsize, COUNT(*) OVER () AS total,
           ROW_NUMBER() OVER (ORDER BY n DESC, chr) AS rank_top,
           ROW_NUMBER() OVER (ORDER BY n ASC, chr DESC) AS rank_low
         FROM (
@@ -553,7 +536,7 @@ export default function Explorer() {
       const num = (r: Record<string, unknown>, k: string) => Number(getVal(r, k));
       const chrStats: ChrStat[] = stats.map(r => ({
         assembly: String(getVal(r, 'assembly')),
-        chr: toDisplay(String(getVal(r, 'chr')), String(getVal(r, 'assembly'))),
+        chr: String(getVal(r, 'chr')),
         n: num(r, 'n'),
         score: [num(r, 's_min'), num(r, 's_q1'), num(r, 's_med'), num(r, 's_q3'), num(r, 's_max')],
         length: [num(r, 'l_min'), num(r, 'l_q1'), num(r, 'l_med'), num(r, 'l_q3'), num(r, 'l_max')],
@@ -564,14 +547,18 @@ export default function Explorer() {
       const single = chrStats.length > 0 && (Boolean(chr) || total === 1);
 
       // Chromosome extent for the 10 bins. Chromosome lengths are not stored, so this is
-      // the last predicted base, not a measured reference chromosome length.
+      // the assembly size for single-sequence assemblies, otherwise the last predicted base.
       let chromLen = 0;
       if (single) {
         const chrName = chr ?? chrStats[0].chr;
-        const r = await runSQL<Record<string, unknown>>(
-          `SELECT MAX("End") AS m FROM data WHERE ${contextWhere} AND ${chromosomeWhere(chrName, lockedAssembly)}`
-        ).catch(() => []);
-        chromLen = Number(getVal(r[0], 'm') ?? -1) + 1;
+        if (chrStats.every(s => s.scaffolds === 1 && s.gsize > 0)) {
+          chromLen = Math.max(...chrStats.map(s => s.gsize));
+        } else {
+          const r = await runSQL<Record<string, unknown>>(
+            `SELECT MAX("End") AS m FROM data WHERE ${contextWhere} AND "Chromosome" = ${q(chrName)}`
+          ).catch(() => []);
+          chromLen = Number(getVal(r[0], 'm') ?? 0);
+        }
         if (request !== vizRequest.current) return;
       }
       const binSize = chromLen > 0 ? chromLen / VIZ_BINS : 0;
@@ -596,7 +583,7 @@ export default function Explorer() {
         LIMIT ${SCATTER_SAMPLE}
       `;
       const sqlBins = binSize > 0 ? `
-        SELECT LEAST(GREATEST(CAST(FLOOR("Start" / ${binSize}) AS INT), 0), ${VIZ_BINS - 1}) AS b, COUNT(*) AS n
+        SELECT LEAST(GREATEST(CAST(FLOOR(("Start" - 1) / ${binSize}) AS INT), 0), ${VIZ_BINS - 1}) AS b, COUNT(*) AS n
         FROM data
         WHERE ${whereSql}
         GROUP BY 1
@@ -636,9 +623,9 @@ export default function Explorer() {
   }
 
   useEffect(() => {
-    if (tab !== 'viz' || !hasQueryContext) { setVizLoading(false); return; }
+    if (tab !== 'viz') return;
+    if (!hasQueryContext) return;
     fetchViz();
-    return invalidateViz;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, whereSql, chr, hasQueryContext]);
 
@@ -914,11 +901,6 @@ export default function Explorer() {
   return (
     <Box sx={{ p: 2 }}>
       <Typography variant="h6" sx={{ mb: 2 }}>Sequence search</Typography>
-      {vizLoading && <CircularProgress size={20} aria-label="Loading visualizations" />}
-      <Typography variant="body2" sx={{ mb: 2 }}>
-        Coordinates and result exports use zero-based starts and inclusive ends.
-        RNA-virus sequences are scored as cDNA; scores indicate sequence-based Z-forming potential.
-      </Typography>
 
       {/* Species + Locked Assembly banner */}
       <Paper sx={{ p: 2, mb: 2 }}>
@@ -1104,7 +1086,7 @@ export default function Explorer() {
               }}
               onScroll={(e) => syncScroll(e.currentTarget, bottomScrollRef.current)}
             >
-              <div style={{
+              <div style={{ 
                 width: "150%",
                 height: "1px",
                 visibility: "hidden"
@@ -1112,7 +1094,7 @@ export default function Explorer() {
             </Box>
 
             {/* Table with bottom scrollbar */}
-            <TableContainer
+            <TableContainer 
               ref={bottomScrollRef}
               sx={{
                 width: "100%",
@@ -1209,15 +1191,15 @@ function naturalSort(a: string, b: string) {
     const reA = /[^\d]+|\d+/g;
     const partsA = a.match(reA) || [];
     const partsB = b.match(reA) || [];
-
+    
     for (let i = 0; i < Math.min(partsA.length, partsB.length); i++) {
         const partA = partsA[i];
         const partB = partsB[i];
-
+        
         // Check if both parts are numeric
         const numA = parseInt(partA, 10);
         const numB = parseInt(partB, 10);
-
+        
         if (!isNaN(numA) && !isNaN(numB)) {
             // Compare as numbers
             if (numA !== numB) return numA - numB;
@@ -1226,6 +1208,6 @@ function naturalSort(a: string, b: string) {
             if (partA !== partB) return partA.localeCompare(partB);
         }
     }
-
+    
     return partsA.length - partsB.length;
 }

@@ -26,19 +26,6 @@ import { shortenTaxonLabel } from '../utils/shortenLabel';
    ========================================================================== */
 
 
-// The species hierarchy exceeds the SQL endpoint's per-request row limit.
-// Page the ordered aggregation before applying the display's top-30 trimming.
-async function fetchHierarchy(sql: string): Promise<TaxonomyTreeRow[]> {
-  const rows: TaxonomyTreeRow[] = [];
-  const pageSize = 50000;
-  for (let offset = 0; offset < 1000000; offset += pageSize) {
-    const page = await runSQL<TaxonomyTreeRow>(`${sql} ORDER BY 1,2,3,4,5,6,7,8,9,10 LIMIT ${pageSize} OFFSET ${offset}`);
-    rows.push(...page);
-    if (page.length < pageSize) return rows;
-  }
-  throw new Error('Taxonomy hierarchy exceeds the supported display size');
-}
-
 const fmtInt = (n: number | null | undefined) =>
   (typeof n === 'number' && Number.isFinite(n)) ? n.toLocaleString() : '—';
 
@@ -139,16 +126,16 @@ export default function MetadataStats() {
             count(distinct family) AS total_families, 
             count(distinct genus) AS total_genus,
             COUNT(DISTINCT species_taxid)           AS unique_taxids,
-            (SELECT AVG(v) FROM (SELECT AVG(try_cast(genome_size AS DOUBLE)) AS v
-               FROM metadata WHERE genome_size >= 1000 GROUP BY species_taxid)) AS avg_genome_size,
-            MIN(try_cast(genome_size AS DOUBLE)) AS min_genome_size,
-            MAX(try_cast(genome_size AS DOUBLE)) AS max_genome_size,
+            (SELECT AVG(v) FROM (SELECT AVG(try_cast(genome_size_manual AS DOUBLE)) AS v
+               FROM metadata WHERE genome_size_manual >= 1000 GROUP BY species_taxid)) AS avg_genome_size,
+            MIN(try_cast(genome_size_manual AS DOUBLE)) AS min_genome_size,
+            MAX(try_cast(genome_size_manual AS DOUBLE)) AS max_genome_size,
             (SELECT ROUND(AVG(v), 2) FROM (SELECT AVG(try_cast(gc_percent AS DOUBLE)) AS v
-               FROM metadata WHERE genome_size >= 1000 GROUP BY species_taxid)) AS avg_gc,
+               FROM metadata WHERE genome_size_manual >= 1000 GROUP BY species_taxid)) AS avg_gc,
             MIN(try_cast(gc_percent  AS DOUBLE))    AS min_gc,
             MAX(try_cast(gc_percent  AS DOUBLE))    AS max_gc
           FROM metadata
-          WHERE genome_size >= 1000
+          WHERE genome_size_manual >= 1000
         `;
         const [ov] = await runSQL<Record<string, unknown>>(overviewSql);
 
@@ -157,7 +144,7 @@ export default function MetadataStats() {
           SELECT kingdom AS label, COUNT(DISTINCT species_taxid) AS n
           FROM metadata
           WHERE kingdom IS NOT NULL AND kingdom <> '' AND kingdom NOT ILIKE '%unclassified%'
-            AND genome_size >= 1000
+            AND genome_size_manual >= 1000
           GROUP BY 1
           ORDER BY n DESC
           LIMIT 5
@@ -170,7 +157,7 @@ export default function MetadataStats() {
           FROM metadata
           WHERE genus IS NOT NULL AND genus <> '' AND 
             genus NOT ILIKE '%unclassified%' AND 
-            genome_size >= 1000
+            genome_size_manual >= 1000
           GROUP BY 1
           ORDER BY n DESC
           LIMIT 5
@@ -181,7 +168,7 @@ export default function MetadataStats() {
         const asmSql = `
           SELECT coalesce(assembly_level,'(unknown)') AS label, COUNT(*) AS n
           FROM metadata
-          WHERE genome_size >= 1000
+          WHERE genome_size_manual >= 1000
           GROUP BY 1
           ORDER BY n DESC
         `;
@@ -202,10 +189,10 @@ export default function MetadataStats() {
             species_taxid AS taxid,
             COUNT(*) AS assembly_count
           FROM metadata
-          WHERE genome_size >= 1000
+          WHERE genome_size_manual >= 1000
           GROUP BY 1,2,3,4,5,6,7,8,9,10
         `;
-        const dist = await fetchHierarchy(distSql);
+        const dist = await runSQL<TaxonomyTreeRow>(distSql);
 
         if (cancelled) return;
 
@@ -456,10 +443,6 @@ export default function MetadataStats() {
       >
         ZSeekerDB insights
       </Typography>
-      <Typography variant="body2" color="text.secondary" align="center" sx={{ mb: 2 }}>
-        Assembly summaries for genomes with predictions and genome size of at least 1,000 bp.
-        Homepage counts cover the complete assembly collection.
-      </Typography>
 
       {loading && (
         <Box sx={{ p: 4, display: 'flex', justifyContent: 'center' }}>
@@ -521,7 +504,7 @@ export default function MetadataStats() {
                   { title: 'Orders', value: fmtInt(totalOrders) },
                   { title: 'Families', value: fmtInt(totalFamilies) },
                   { title: 'Genera', value: fmtInt(totalGenus) },
-                  { title: 'Species grouping IDs', value: fmtInt(uniqueTaxids) },
+                  { title: 'Unique taxids', value: fmtInt(uniqueTaxids) },
                 ].map((kpi) => (
                   <Paper
                     key={kpi.title}
