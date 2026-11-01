@@ -18,9 +18,9 @@ function Home() {
       <Paper elevation={1} sx={{ p: 3 }}>
         <Typography variant="h4" fontWeight={800} gutterBottom>ZSeekerDB</Typography>
         <Typography paragraph>
-          ZSeekerDB is a large-scale, comprehensive database cataloging predicted Z-DNA sequences across all major branches of life. 
+          ZSeekerDB is a large-scale database of predicted Z-DNA-forming sequences across organisms and viruses representing all major branches of life. 
           It provides interactive search, visualization, and download options, enabling independent exploration of Z-DNA data. 
-          The current release includes over 320,000 genome assemblies and more than 2.5 billion predicted Z-forming sequences. 
+          The current release (v. 1.0) includes over 320,000 genome assemblies and more than 2.5 billion predicted Z-forming sequences. 
           ZSeekerDB fills a long-standing gap between experimental discoveries and comparative genomics of non-B DNA structures.
         </Typography>
 
