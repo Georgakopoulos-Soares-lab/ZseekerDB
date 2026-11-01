@@ -157,7 +157,7 @@ def replay(con):
         ("metadata ungapped range filter", "SELECT COUNT(*) FROM metadata WHERE genome_size >= 1000 AND genome_size_ungapped >= 5000000"),
         ("zdna search", 'SELECT "Chromosome","Start","End","Z-DNA Score","Sequence" FROM data WHERE "Z-DNA Score" >= 100 LIMIT 5'),
         ("zdna score histogram", 'SELECT CAST(floor("Z-DNA Score" / 5) * 5 AS INT) AS bin, COUNT(*) AS count '
-                                 'FROM data USING SAMPLE 200000 ROWS GROUP BY 1 ORDER BY 1'),
+                                 'FROM (SELECT "Z-DNA Score" FROM data USING SAMPLE 200000 ROWS) GROUP BY 1 ORDER BY 1'),
         ("zdna by assembly (Explorer)", "SELECT COUNT(*) FROM data WHERE assembly = 'GCF_000005845.2'"),
         ("distinct_chr autocomplete", "SELECT \"Chromosome\" AS v FROM chromosomes WHERE LOWER(\"Chromosome\") LIKE 'cp%' LIMIT 10"),
         ("distinct_assembly autocomplete", "SELECT assembly AS v FROM metadata WHERE LOWER(assembly) LIKE 'gcf_0000058%' "
