@@ -78,6 +78,25 @@ export default function DownloadDataset() {
           RNA-virus genomes are scored as cDNA sequences; sequence scores do not validate Z-RNA formation.
         </Typography>
       </Paper>
+
+      {/* Footer */}
+      <Box
+        sx={{
+          mt: 4,
+          pt: 2,
+          borderTop: 1,
+          borderColor: 'divider',
+          color: 'text.secondary',
+        }}
+      >
+        <Typography variant="caption">
+          For questions about dataset content or structure, please contact{' '}
+          <Link href="mailto:ilias@austin.utexas.edu">
+            ilias@austin.utexas.edu
+          </Link>
+          .
+        </Typography>
+      </Box>
     </Box>
   );
 }
