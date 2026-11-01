@@ -36,20 +36,41 @@ The final assembly-metadata TSV has SHA-256
 
 ## Dataset downloads and reconstruction
 
-The build produces 23 checksummed bundles containing CSV, JSON, Parquet and
-BED4 predictions, together with assembly metadata. Public dataset DOI and file
-links are shown on the portal after publication and anonymous checksum
-verification; private draft records are not public downloads. Individual query
-results can be exported from Sequence search.
+The **October 2026 datasets are public on Zenodo**: 23 downloadable archives
+in 14 open records, published 26 October 2026. Every direct link below returned
+HTTP 200 with the expected file size on 1 November 2026. The Downloads page
+also lists each file's published MD5 checksum and its record/DOI.
 
-Full CSV, JSON and Parquet downloads each require **both parts**: part 1 contains
-Archaea, Bacteria and Viruses; part 2 contains Eukaryota. Unpack the outer
-container and then its inner superkingdom archives. BED4 uses half-open ends
-and stores the assembly accession and unscaled ZSeeker score in its name field.
-Other prediction formats retain native inclusive ends.
+| Scope | CSV | JSON | Parquet | BED |
+| --- | --- | --- | --- | --- |
+| Entire dataset | [![All CSV Part 1 of 2](https://img.shields.io/badge/CSV-Part%201%20of%202-2374ab?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677639/files/zseeker_csv_part1.tar.gz?download=1) [![All CSV Part 2 of 2](https://img.shields.io/badge/CSV-Part%202%20of%202-2374ab?logo=zenodo&logoColor=white)](https://zenodo.org/records/23678010/files/zseeker_csv_part2.tar.gz?download=1) | [![All JSON Part 1 of 2](https://img.shields.io/badge/JSON-Part%201%20of%202-8e44ad?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677625/files/zseeker_json_part1.tar.gz?download=1) [![All JSON Part 2 of 2](https://img.shields.io/badge/JSON-Part%202%20of%202-8e44ad?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677745/files/zseeker_json_part2.tar.gz?download=1) | [![All PARQUET Part 1 of 2](https://img.shields.io/badge/PARQUET-Part%201%20of%202-22863a?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677791/files/zseeker_parquet_part1.tar.gz?download=1) [![All PARQUET Part 2 of 2](https://img.shields.io/badge/PARQUET-Part%202%20of%202-22863a?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677789/files/zseeker_parquet_part2.tar.gz?download=1) | [![All BED Download](https://img.shields.io/badge/BED-Download-b05a00?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677870/files/zseekerdb_bed.tar.gz?download=1) |
+| Archaea | [![Archaea CSV Download](https://img.shields.io/badge/CSV-Download-2374ab?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677150/files/archaea_CSV.tar.gz?download=1) | [![Archaea JSON Download](https://img.shields.io/badge/JSON-Download-8e44ad?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677146/files/archaea_JSON.tar.gz?download=1) | [![Archaea PARQUET Download](https://img.shields.io/badge/PARQUET-Download-22863a?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677152/files/archaea_PARQUET.tar.gz?download=1) | [![Archaea BED Download](https://img.shields.io/badge/BED-Download-b05a00?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677154/files/archaea_BED.tar.gz?download=1) |
+| Bacteria | [![Bacteria CSV Download](https://img.shields.io/badge/CSV-Download-2374ab?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677150/files/bacteria_CSV.tar.gz?download=1) | [![Bacteria JSON Download](https://img.shields.io/badge/JSON-Download-8e44ad?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677146/files/bacteria_JSON.tar.gz?download=1) | [![Bacteria PARQUET Download](https://img.shields.io/badge/PARQUET-Download-22863a?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677152/files/bacteria_PARQUET.tar.gz?download=1) | [![Bacteria BED Download](https://img.shields.io/badge/BED-Download-b05a00?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677154/files/bacteria_BED.tar.gz?download=1) |
+| Eukaryota | [![Eukaryota CSV Download](https://img.shields.io/badge/CSV-Download-2374ab?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677533/files/eukaryota_CSV.tar.gz?download=1) | [![Eukaryota JSON Download](https://img.shields.io/badge/JSON-Download-8e44ad?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677610/files/eukaryota_JSON.tar.gz?download=1) | [![Eukaryota PARQUET Download](https://img.shields.io/badge/PARQUET-Download-22863a?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677297/files/eukaryota_PARQUET.tar.gz?download=1) | [![Eukaryota BED Download](https://img.shields.io/badge/BED-Download-b05a00?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677154/files/eukaryota_BED.tar.gz?download=1) |
+| Viruses | [![Viruses CSV Download](https://img.shields.io/badge/CSV-Download-2374ab?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677150/files/viruses_CSV.tar.gz?download=1) | [![Viruses JSON Download](https://img.shields.io/badge/JSON-Download-8e44ad?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677146/files/viruses_JSON.tar.gz?download=1) | [![Viruses PARQUET Download](https://img.shields.io/badge/PARQUET-Download-22863a?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677152/files/viruses_PARQUET.tar.gz?download=1) | [![Viruses BED Download](https://img.shields.io/badge/BED-Download-b05a00?logo=zenodo&logoColor=white)](https://zenodo.org/records/23677154/files/viruses_BED.tar.gz?download=1) |
 
-To rebuild the database from the Parquet downloads, unpack exactly one copy of
-each shard and use the complete final metadata TSV:
+For the complete dataset, download **both parts of the same CSV, JSON or Parquet
+format**. The full archives are split by assembly accession; each part contains
+the complete metadata. Individual superkingdom archives provide a smaller download.
+Extract the `.tar.gz` files to access prediction and metadata tables.
+
+The published records report **324,198 assemblies and 2,563,977,897 predictions**;
+the verified portal catalog above contains **324,200 assemblies and 2,563,977,909
+predictions**. Use the metadata bundled with the downloaded archives for their
+assembly attributes and counts.
+
+**Archived BED coordinates:** the published four-column files contain chromosome,
+start, native inclusive end and raw ZSeeker score. A checked locus is
+`CP115555.1:605–655` (51 bp); for standard half-open BED it must be `605–656`.
+Add one to the end before using these archived BED files with BED tools. The
+repository's `export_release.py` already performs this conversion and writes
+assembly/score names when generating BED4. Archived chromosome accessions are
+preserved; the portal displays human chromosome aliases at the interface boundary.
+
+### Reconstruction from repository-generated exports
+
+To rebuild the verified catalog from Parquet exports produced by this repository,
+unpack exactly one copy of each shard and use its matching final metadata TSV:
 
 ```bash
 python3 -m pip install -r scripts/migrate/requirements.txt

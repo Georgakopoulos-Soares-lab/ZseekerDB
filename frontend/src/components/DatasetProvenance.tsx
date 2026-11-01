@@ -15,9 +15,8 @@ export default function DatasetProvenance() {
       </>}
     </Typography>
     <Typography color="text.secondary">
-      {archive.doi && archive.files.length > 0
-        ? <Link href={`https://doi.org/${archive.doi}`}>Dataset DOI: {archive.doi}</Link>
-        : <>Public dataset archive: verification pending.</>}
+      Public dataset downloads: <Link href="/download">{archive.files.length} archives in{' '}
+      {archive.records.length} published Zenodo records</Link> (October 2026).
     </Typography>
     {archive.metadataSha256 && <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
       Metadata SHA-256: <code>{archive.metadataSha256}</code>
