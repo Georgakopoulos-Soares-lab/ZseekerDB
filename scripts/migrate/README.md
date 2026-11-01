@@ -1,46 +1,109 @@
-# ZSeekerDB data migration (Oct-2026 release)
+# ZSeekerDB database build and exports
 
-Builds `zdnadatabase_2026-10.duckdb` from the new ZSeeker predictions and the Oct-2026
-metadata TSV, keeping the table/column names the backend and frontend already query.
-Written with **DuckDB 1.1.3**, to match the deployed `go-duckdb v1.8.5` engine (required
-for file-format compatibility).
+Builds the portal DuckDB from source predictions and the assembly metadata TSV.
+Use **DuckDB 1.1.3**, matching **go-duckdb v1.8.5**. The complete field-level
+schema and pipeline rules are documented in the [main README](../../README.md).
 
 ## Inputs
-- `all_zseeker_final.tar.gz`: per-assembly `*.zseeker.csv` (Chromosome,Start,End,Z-DNA Score,Sequence)
-- `zseeker_db_assembly_all_metadata.tsv` (Oct-2026, 31 cols, 324,198 assemblies): metadata
-  incl. per-assembly Z-DNA stats. Set `MIG_META_TSV` to override the path.
+- `all_zseeker_final.tar.gz` — per-assembly `*.zseeker.csv` (Chromosome,Start,End,Z-DNA Score,Sequence)
+- `zseeker_db_assembly_all_metadata.tsv` — per-assembly metadata incl. precomputed Z-DNA stats
 
-## Data rules
-- **Placeholder rows dropped.** ZSeeker writes `Chromosome,,,,` for every sequence without
-  predictions (24,116,216 rows); `data` holds real predictions only.
-- **Assemblies without predictions dropped** (`MIG_DROP_EMPTY_ASSEMBLIES=1`, default):
-  175,983 of 324,198, leaving 148,215 in `metadata`. Assemblies absent from the TSV are dropped too.
-- `metadata` column mapping (TSV -> DB): `assembly_accession`->`assembly`,
-  `ncbi_summary_taxid`->`taxid`, `resolve_level`->`assembly_level` (`Complete Genome`/`Chromosome`),
-  `z_predictions_count`->`obs_n_zdna`, `total_z_bases`->`obs_zbp`,
-  `z_density * 1000`->`obs_density_per_kb` (TSV density is a fraction of `genome_size_manual`),
-  `is_t2t` = "T2T" in the source filename. `bioproject`/`biosample` no longer exist.
-  New TSV fields are appended (see `release.py`).
-- `chromosomes` / `tax_names` list only chromosomes / species that have predictions.
+## Pipeline (`run_all.sh` orchestrates)
+1. `audit.py` — CSV-vs-TSV assembly name-mismatch audit + regex coverage.
+2. `build_data.py` — builds `data` from valid prediction records. Byte-bounded, atomic, **resumable**
+   batches (resume = sorted-file prefix via `_ingest_state`).
+3. `build_meta_stats.py` — `metadata_all` (all input assemblies), `metadata` (prediction-bearing browser subset), `chromosomes`, `tax_names`, `data_kpis`,
+   `data_top_asm`, `data_top_chrom`, and views `zdna` / `metadata_view`.
+   Idempotent (skips existing tables; `MIG_FORCE=1` to rebuild).
+4. `verify.py` — expected schema, row counts, join integrity, endpoint-SQL replay.
 
-## Pipelines
-**Incremental (used for this release):** `rebuild_release.py [data|metadata|derived]` copies
-`data` from the July build (`zdnadatabase_shrunk.duckdb`, same tarball) with the rules above,
-then rebuilds `metadata` and the derived tables. ~1.5h on a vm-small node.
+For independently completed extraction, set `MIG_WAIT_FOR_EXTRACTION=0`. The
+driver otherwise waits for `build/logs/extract.log` to contain `DONE_EXTRACT`.
+Any failed stage, including verification, stops the driver without a completion marker.
+Set `PYTHON` to choose an interpreter.
 
-**From scratch:** extract the tarball to `build/csv`, then `run_all.sh`
-(`audit.py` -> `build_data.py` -> `build_meta_stats.py` -> `verify.py`).
+Tunables via env: `MIG_THREADS`, `MIG_MEM_GB`, `MIG_BATCH_BYTES`, `MIG_BATCH_MAXFILES`.
 
-Both share the metadata/derived/view SQL in `release.py`.
+## Validation and input selection
 
-## Verify
-`verify.py [db]`: schema, no NULL/placeholder rows, per-assembly counts and bases equal
-`metadata`, no orphans either way, density units, and a replay of endpoint/frontend SQL.
-Exits non-zero on any failure.
+Set `MIG_ROOT`, `MIG_DB_PATH`, `MIG_META_TSV` and `MIG_CSV_DIR` explicitly for a
+portable build. The workspace TSV has 324,200 rows and 60,841 species taxids;
+its stored prediction totals must be reconciled against the source archive.
+Historical build logs are not evidence for the current input files.
 
-Tunables via env: `MIG_THREADS`, `MIG_MEM_GB`, `MIG_BATCH_BYTES`, `MIG_BATCH_MAXFILES`, `MIG_DB_PATH`.
+`release.py` rebuilds metadata; set `MIG_RECOMPUTE_OBSERVED=1` to replace
+stale TSV prediction summaries from the actual `data` table. The full
+`build_meta_stats.py` path always recomputes these summaries. It supports both `ncbi_species_taxid` and
+`ncbi_summary_species_taxid` and always retains all assemblies in `metadata_all`.
+`MIG_DROP_EMPTY_ASSEMBLIES=1` affects the browser `metadata` subset only.
+`verify.py` exits nonzero on schema, join, metadata/prediction-count or SQL errors.
+Run the verifier against the full rebuilt database, not the two-bit benchmark.
 
-## Sequence 2-bit codec (`seqcodec.py`): space-reduction experiment, not used
-Lossless 2-bit packing of `Sequence`. Benchmarked in July: `LIKE` search via the decode
-UDF is ~90x slower than VARCHAR, so the release keeps VARCHAR.
-Tests: `python3 -m pytest scripts/migrate/tests/ -q`
+`audit_archive.py INPUT.tar.gz inventory.csv` inventories the source tar without
+extracting it. `prepare_human.py INPUT_HUMAN.csv OUTPUT_DIR` writes a separate
+human CSV and BED4, validates every coordinate/sequence length and records hashes.
+Original source files and existing archive bundles are preserved.
+
+## Reuse native predictions from an existing database
+
+`rebuild_release.py` accepts `data`, `metadata` and `derived` stages (all by default).
+Set `MIG_SOURCE_DB` to a separate existing DuckDB; the other input variables are
+unchanged. It removes placeholder-only rows, rejects malformed prediction records,
+preserves native coordinates, and retains every assembly. The final metadata must
+cover every prediction-bearing accession. Derived summaries are recomputed from
+copied loci using the supplied `genome_size`; no fixed assembly exclusions apply.
+Run `verify.py` after rebuilding. Use original CSV filenames or final metadata
+containing `is_t2t` to retain filename-derived T2T flags.
+
+## Sequence 2-bit codec (`seqcodec.py`) — space-reduction work
+Lossless 2-bit packing of the `Sequence` column (72% of DB size) with a raw
+fallback for non-ACGT. Regression tests in `tests/` pin the sequence logic:
+- `test_seqcodec.py` — encode/decode round-trip, edge/fallback cases, real-sample round-trip.
+- `test_query_equivalence.py` — BLOB+decode reproduces identical results to VARCHAR
+  for projection, `LIKE` search, filters, lengths, and the `zdna` view shape.
+
+Run: `python3 -m pytest scripts/migrate/tests/ -q`
+
+## Final supplementary metadata and downloads
+
+After the database verifier passes:
+
+```bash
+python3 scripts/migrate/export_metadata.py "$MIG_DB_PATH" "$MIG_META_TSV" /path/to/assembly_metadata.tsv
+python3 scripts/migrate/export_release.py "$MIG_DB_PATH" /path/to/assembly_metadata.tsv /path/to/final_archive
+```
+
+The metadata exporter preserves the supplied assembly attributes and replaces
+stale prediction summaries with verified observations. The archive exporter
+writes CSV, JSON arrays, Parquet and BED4, partitioned by superkingdom, then
+checksummed archives. Native exports retain inclusive ends; BED adds one to the
+end. Only the specified human assembly receives chromosome aliases.
+
+Full CSV, JSON and Parquet exports have two parts: Archaea/Bacteria/Viruses,
+and Eukaryota. Both are needed for the complete dataset. Full-download containers hold the
+already-compressed superkingdom archives; unpack both container levels. This
+avoids recompressing hundreds of gigabytes twice. The manifest lists
+membership, byte size, SHA-256 and MD5. Parallel gzip members are bounded in
+memory and readable by ordinary gzip/tar tools. Completed phases and bundles
+can be resumed; incomplete partition directories or `.partial` archives must
+be inspected before retrying. Existing archive directories are not overwritten.
+
+Public record IDs and file checksums must be verified anonymously before
+populating `frontend/src/data/archive.ts`. Upload-state IDs are not public links.
+
+## Reconstruct from the Parquet downloads
+
+Unpack the full Parquet containers and their inner archives, keeping exactly one
+copy of each shard. With the complete final metadata TSV:
+
+```bash
+python3 scripts/migrate/import_release.py '/path/to/unpacked/**/*parquet' /path/to/assembly_metadata.tsv /path/to/new.duckdb
+```
+
+The importer checks the expected row total, restores native human chromosome
+accessions, builds all derived objects and runs the same verifier. It refuses to
+overwrite an existing database. The final metadata supplies the filename-derived
+T2T flag when original prediction filenames are unavailable. Use DuckDB 1.1.3.
+
+`export_schema.py DATABASE OUTPUT.tsv` exports the actual public schema, including
+types, units, field definitions and examples, for Supplementary Table 5.

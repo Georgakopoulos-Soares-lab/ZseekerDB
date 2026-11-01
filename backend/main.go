@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/csv"
@@ -29,17 +30,17 @@ import (
 )
 
 type Config struct {
-	DBPath        string
-	StaticDir     string
-	Threads       int
-	MetadataGlob  string
-	AdminToken    string
-	TempDir       string
-	MaxTempGiB    int
-	MemoryLimitGB int
-	Host          string
-	Port          int
-	CORSOrigins   []string
+	DBPath         string
+	StaticDir      string
+	Threads        int
+	TempDir        string
+	MaxTempGiB     int
+	MemoryLimitGB  int
+	Host           string
+	Port           int
+	CORSOrigins    []string
+	TrustedProxies []string
+	AdminToken     string
 }
 
 func loadConfig() (*Config, error) {
@@ -55,9 +56,6 @@ func loadConfig() (*Config, error) {
 	// with a persistent-volume path such as /data/zdnadatabase.duckdb.
 	cfg.DBPath = get("DUCKDB_PATH", "data/zdnadatabase.duckdb")
 	cfg.StaticDir = get("STATIC_DIR", "frontend/dist")
-	// Full release metadata (all assemblies, incl. those with 0 predictions).
-	// The DuckDB metadata table only holds assemblies with predictions.
-	cfg.MetadataGlob = get("METADATA_GLOB", "data/metadata.tsv.gz")
 	cfg.AdminToken = get("ADMIN_TOKEN", "")
 	cfg.TempDir = get("DUCKDB_TEMP_DIR", "data/tmp")
 	if p, err := strconv.Atoi(get("DUCKDB_MAX_TEMP_GIB", "50")); err == nil {
@@ -88,6 +86,11 @@ func loadConfig() (*Config, error) {
 			cfg.CORSOrigins = append(cfg.CORSOrigins, o)
 		}
 	}
+	for _, proxy := range strings.Split(get("TRUSTED_PROXIES", ""), ",") {
+		if proxy = strings.TrimSpace(proxy); proxy != "" {
+			cfg.TrustedProxies = append(cfg.TrustedProxies, proxy)
+		}
+	}
 	return cfg, nil
 }
 
@@ -102,8 +105,8 @@ type Server struct {
 }
 
 // openDuckDB opens an in-memory DuckDB, attaches the release file read-only as
-// "zdb" and exposes its objects under their usual names, except metadata, which
-// is loaded from the full release TSV (see loadReleaseMetadata).
+// "zdb". Metadata and predictions come from this same verified release; source
+// chromosome accessions stay native in SQL and are mapped only for display.
 func openDuckDB(cfg *Config) (*sql.DB, error) {
 	dsn := fmt.Sprintf("?threads=%d", cfg.Threads)
 	db, err := sql.Open("duckdb", dsn)
@@ -145,24 +148,22 @@ func openDuckDB(cfg *Config) (*sql.DB, error) {
 		names = append(names, n)
 	}
 	rows.Close()
+	if _, err := db.Exec(`CREATE VIEW metadata AS SELECT m.*, a.species_taxid FROM zdb.main.metadata m JOIN zdb.main.metadata_all a USING (assembly)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("loading final database metadata: %w", err)
+	}
 	for _, n := range names {
-		// metadata comes from the TSV; zdna is recreated over the data view below.
-		if n == "metadata" || n == "metadata_view" || n == "zdna" {
+		// Add species grouping IDs to the browser projection; keep the stored schema intact.
+		if n == "metadata" {
 			continue
 		}
 		src := "SELECT * FROM zdb.main." + quoteIdent(n)
-		if n == "data" {
-			src = `SELECT * REPLACE (` + chromosomeDisplaySQL + ` AS "Chromosome") FROM zdb.main.data`
-		}
 		if _, err := db.Exec(fmt.Sprintf("CREATE VIEW %s AS %s", quoteIdent(n), src)); err != nil {
 			db.Close()
 			return nil, err
 		}
 	}
-	if err := loadReleaseMetadata(db, cfg); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("loading metadata from %s: %w", cfg.MetadataGlob, err)
-	}
+
 	if err := lockDownEngine(db); err != nil {
 		db.Close()
 		return nil, err
@@ -182,77 +183,6 @@ func lockDownEngine(db *sql.DB) error {
 	return nil
 }
 
-// UCSC-style names for the human T2T assembly's chromosomes (NCBI RefSeq -> 1..22, X, Y).
-// Only this assembly is renamed; every other assembly keeps its sequence accessions.
-const humanT2TAssembly = "GCF_009914755.1"
-
-var humanT2TChromosomes = [][2]string{
-	{"NC_060925.1", "1"}, {"NC_060926.1", "2"}, {"NC_060927.1", "3"}, {"NC_060928.1", "4"},
-	{"NC_060929.1", "5"}, {"NC_060930.1", "6"}, {"NC_060931.1", "7"}, {"NC_060932.1", "8"},
-	{"NC_060933.1", "9"}, {"NC_060934.1", "10"}, {"NC_060935.1", "11"}, {"NC_060936.1", "12"},
-	{"NC_060937.1", "13"}, {"NC_060938.1", "14"}, {"NC_060939.1", "15"}, {"NC_060940.1", "16"},
-	{"NC_060941.1", "17"}, {"NC_060942.1", "18"}, {"NC_060943.1", "19"}, {"NC_060944.1", "20"},
-	{"NC_060945.1", "21"}, {"NC_060946.1", "22"}, {"NC_060947.1", "X"}, {"NC_060948.1", "Y"},
-}
-
-// chromosomeDisplaySQL is the "Chromosome" expression of the data view.
-var chromosomeDisplaySQL = func() string {
-	var b strings.Builder
-	b.WriteString(`CASE WHEN assembly = '` + humanT2TAssembly + `' THEN CASE "Chromosome"`)
-	for _, m := range humanT2TChromosomes {
-		b.WriteString(fmt.Sprintf(" WHEN '%s' THEN '%s'", m[0], m[1]))
-	}
-	b.WriteString(` ELSE "Chromosome" END ELSE "Chromosome" END`)
-	return b.String()
-}()
-
-// loadReleaseMetadata builds the in-memory metadata table from the release TSV,
-// with the same TSV->DB column mapping as scripts/migrate/release.py, but keeping
-// assemblies without predictions (0 is a valid density). T2T status and has_gff
-// are intentionally not part of the metadata.
-func loadReleaseMetadata(db *sql.DB, cfg *Config) error {
-	t := func(c string) string { return fmt.Sprintf("nullif(m.%s,'')", c) }
-	na := func(c string) string { return fmt.Sprintf("nullif(nullif(m.%s,''),'na')", c) }
-	big := func(c string) string { return fmt.Sprintf("TRY_CAST(m.%s AS BIGINT)", c) }
-	_, err := db.Exec(`
-	CREATE TABLE metadata AS
-	SELECT
-		m.assembly_accession                      AS assembly,
-		` + big("ncbi_summary_taxid") + `         AS taxid,
-		CASE m.resolve_level WHEN 'complete' THEN 'Complete Genome'
-		                     WHEN 'chromosome' THEN 'Chromosome'
-		                     ELSE ` + t("resolve_level") + ` END AS assembly_level,
-		TRY_CAST(m.gc_percent AS DOUBLE)          AS gc_percent,
-		` + t("superkingdom") + `                 AS superkingdom,
-		` + t("kingdom") + `                      AS kingdom,
-		` + t("phylum") + `                       AS phylum,
-		` + t("class") + `                        AS class,
-		` + t(`"order"`) + `                      AS "order",
-		` + t("family") + `                       AS family,
-		` + t("genus") + `                        AS genus,
-		` + t("tax_name") + `                     AS tax_name,
-		` + t("viral_realm") + `                  AS viral_realm,
-		` + t("updated_tax_name") + `             AS updated_tax_name,
-		` + big("total_z_bases") + `              AS obs_zbp,
-		-- TSV z_density is a fraction (total_z_bases / genome_size_manual); app shows per kb
-		TRY_CAST(m.z_density AS DOUBLE) * 1000    AS obs_density_per_kb,
-		` + big("z_predictions_count") + `        AS obs_n_zdna,
-		` + big("ncbi_summary_species_taxid") + ` AS species_taxid,
-		` + t("organism_name") + `                AS organism_name,
-		` + t("species") + `                      AS species,
-		` + na("infraspecific_name") + `          AS infraspecific_name,
-		` + big("genome_size_ungapped") + `       AS genome_size_ungapped,
-		` + big("genome_size_manual") + `         AS genome_size_manual,
-		` + big("replicon_count") + `             AS replicon_count,
-		` + big("scaffold_count") + `             AS scaffold_count,
-		` + big("contig_count") + `               AS contig_count,
-		TRY_CAST(m.reference_genome AS BOOLEAN)   AS reference_genome,
-		` + na("paired_asm_comp") + `             AS paired_asm_comp
-	FROM read_csv('` + sqlQuote(normalizePath(cfg.MetadataGlob)) + `', delim='\t', header=true, all_varchar=true) m
-	ORDER BY m.assembly_accession`)
-	return err
-}
-
 func (s *Server) createOrReplaceViews() error {
 	var cnt int
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM information_schema.tables WHERE LOWER(table_name)='zdna' AND table_catalog=current_database()`).Scan(&cnt)
@@ -270,9 +200,16 @@ SELECT "Chromosome","Start","End","Z-DNA Score","Sequence", "assembly" AS "Assem
 	return nil
 }
 
+func nullableFloat(v sql.NullFloat64) *float64 {
+	if !v.Valid {
+		return nil
+	}
+	return &v.Float64
+}
+
 // ---------- home insights: single cached endpoint ----------
 
-// Every input (the release DuckDB file and metadata TSV) is fixed for the life of
+// The input release DuckDB file is fixed for the life of
 // the process, so the insights payload is computed once (warmed at startup) and
 // then served from memory.
 var (
@@ -280,36 +217,6 @@ var (
 	insightsPayload []byte
 	insightsFlight  singleflight.Group
 )
-
-// Top kingdoms by species-taxid-balanced mean density: assembly densities
-// (0 for assemblies without predictions) are averaged per species taxid, then
-// those means are averaged per kingdom. Unclassified kingdoms are excluded.
-const homeTopKingdomsQuery = `
-	WITH per_taxid AS (
-		SELECT
-			kingdom,
-			species_taxid,
-			AVG(TRY_CAST(obs_density_per_kb AS DOUBLE)) AS taxid_density,
-			COUNT(*) AS assembly_count,
-			COALESCE(MAX(superkingdom), '(unknown)') AS superkingdom
-		FROM metadata
-		WHERE kingdom IS NOT NULL AND kingdom <> ''
-		  AND kingdom NOT ILIKE '%unclassified%'
-		  AND species_taxid IS NOT NULL
-		  AND obs_density_per_kb IS NOT NULL
-		  AND genome_size_manual >= 1000
-		GROUP BY kingdom, species_taxid
-	)
-	SELECT
-		kingdom AS label,
-		AVG(taxid_density) AS density,
-		SUM(assembly_count) AS assembly_count,
-		COUNT(*) AS unique_taxids,
-		COALESCE(MAX(superkingdom), '(unknown)') AS superkingdom
-	FROM per_taxid
-	GROUP BY kingdom
-	ORDER BY density DESC
-	LIMIT 10`
 
 // Score histogram over a species-taxid-balanced sample: each species taxid
 // contributes about scoreSamplePerTaxid predictions (all of them if it has
@@ -405,16 +312,23 @@ func (s *Server) computeInsights() ([]byte, error) {
 		N   int64   `json:"n"`
 	}
 	type KPIs struct {
-		TotalAssemblies int64   `json:"total_assemblies"`
-		UniqueTaxids    int64   `json:"unique_taxids"`
-		AvgGenomeSize   float64 `json:"avg_genome_size"`
-		AvgGC           float64 `json:"avg_gc"`
+		TotalAssemblies  int64    `json:"total_assemblies"`
+		TotalPredictions int64    `json:"total_predictions"`
+		UniqueTaxids     int64    `json:"unique_taxids"`
+		AvgGenomeSize    *float64 `json:"avg_genome_size"`
+		AvgGC            *float64 `json:"avg_gc"`
+	}
+	type ScatterPt struct {
+		GS float64 `json:"gs"`
+		GC float64 `json:"gc"`
+		SK string  `json:"sk"`
 	}
 	type InsightsResponse struct {
-		KPIs          KPIs      `json:"kpis"`
-		Superkingdoms []KV      `json:"superkingdoms"`
-		TopKingdoms   []TopKV   `json:"top_kingdoms"`
-		Histogram     []HistBin `json:"histogram"`
+		KPIs          KPIs        `json:"kpis"`
+		Superkingdoms []KV        `json:"superkingdoms"`
+		TopKingdoms   []TopKV     `json:"top_kingdoms"`
+		Histogram     []HistBin   `json:"histogram"`
+		Scatter       []ScatterPt `json:"scatter"`
 	}
 
 	var (
@@ -422,6 +336,7 @@ func (s *Server) computeInsights() ([]byte, error) {
 		skRows   []KV
 		topRows  []TopKV
 		histRows []HistBin
+		scRows   []ScatterPt
 	)
 
 	// Run all queries concurrently — total wall-time ≈ slowest query, not sum.
@@ -429,37 +344,23 @@ func (s *Server) computeInsights() ([]byte, error) {
 
 	g.Go(func() error {
 		var gs, gc sql.NullFloat64
-		var ta, ut sql.NullInt64
-		// Genome size and GC are species-taxid-balanced: mean per species taxid,
-		// then mean of those means.
-		err := s.db.QueryRow(`
-			SELECT SUM(n), COUNT(species_taxid), AVG(gs), AVG(gc)
-			FROM (
-				SELECT species_taxid,
-				       COUNT(*) AS n,
-				       AVG(TRY_CAST(genome_size_manual AS DOUBLE)) AS gs,
-				       AVG(TRY_CAST(gc_percent AS DOUBLE)) AS gc
-				FROM metadata
-				GROUP BY 1
-			) t`).Scan(&ta, &ut, &gs, &gc)
+		var ta, ut, predictions sql.NullInt64
+		err := s.db.QueryRow(homeKPIsQuery).Scan(&ta, &ut, &gs, &gc, &predictions)
 		if err != nil {
 			return err
 		}
 		kpis = KPIs{
-			TotalAssemblies: ta.Int64,
-			UniqueTaxids:    ut.Int64,
-			AvgGenomeSize:   gs.Float64,
-			AvgGC:           gc.Float64,
+			TotalAssemblies:  ta.Int64,
+			UniqueTaxids:     ut.Int64,
+			AvgGenomeSize:    nullableFloat(gs),
+			AvgGC:            nullableFloat(gc),
+			TotalPredictions: predictions.Int64,
 		}
 		return nil
 	})
 
 	g.Go(func() error {
-		rows, err := s.db.Query(`
-			SELECT COALESCE(superkingdom,'(unknown)') AS label, COUNT(*) AS n,
-			       COUNT(DISTINCT species_taxid) AS taxids
-			FROM metadata WHERE genome_size_manual >= 1000
-			GROUP BY 1 ORDER BY n DESC`)
+		rows, err := s.db.Query(homeSuperkingdomsQuery)
 		if err != nil {
 			return err
 		}
@@ -521,6 +422,31 @@ func (s *Server) computeInsights() ([]byte, error) {
 		return rows.Err()
 	})
 
+	g.Go(func() error {
+		rows, err := s.db.Query(`
+			SELECT TRY_CAST(genome_size AS DOUBLE) AS gs,
+			       TRY_CAST(gc_percent  AS DOUBLE) AS gc,
+			       COALESCE(superkingdom,'(unknown)') AS sk
+			FROM metadata_all
+			WHERE genome_size > 0 AND gc_percent IS NOT NULL
+			USING SAMPLE 5000 ROWS`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p ScatterPt
+			var gs, gc sql.NullFloat64
+			if err := rows.Scan(&gs, &gc, &p.SK); err != nil {
+				return err
+			}
+			p.GS = gs.Float64
+			p.GC = gc.Float64
+			scRows = append(scRows, p)
+		}
+		return rows.Err()
+	})
+
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}
@@ -541,6 +467,7 @@ func (s *Server) computeInsights() ([]byte, error) {
 		Superkingdoms: skRows,
 		TopKingdoms:   topRows,
 		Histogram:     histRows,
+		Scatter:       scRows,
 	})
 }
 
@@ -703,7 +630,7 @@ func (s *Server) metadataList(c *gin.Context) {
 	// of one species) keep a fixed order, so paging never repeats or skips rows.
 	orderBy += ", assembly"
 
-	// Always enforce genome_size_manual >= 1000
+	// Always enforce genome_size >= 1000
 	whereParts := []string{metadataBaseFilter}
 	args := []any{}
 
@@ -792,8 +719,7 @@ func metadataFilters(c *gin.Context) ([]string, []any) {
 
 	type rng struct{ col, min, max string }
 	for _, r := range []rng{
-		{"genome_size_manual", "genome_size_min", "genome_size_max"},
-		{"genome_size_ungapped", "genome_size_ungapped_min", "genome_size_ungapped_max"},
+		{"genome_size", "genome_size_min", "genome_size_max"},
 		{"gc_percent", "gc_percent_min", "gc_percent_max"},
 	} {
 		if v := strings.TrimSpace(c.Query(r.min)); v != "" {
@@ -865,7 +791,7 @@ func (s *Server) metadataCharts(c *gin.Context) {
 
 	pointSQL := `
 		SELECT COALESCE(MAX(superkingdom), '(NA)'), COALESCE(MAX(tax_name), ''), COUNT(*),
-		       ROUND(AVG(gc_percent), 2), ROUND(AVG(obs_density_per_kb), 3), ROUND(AVG(genome_size_manual))
+		       ROUND(AVG(gc_percent), 2), ROUND(AVG(obs_density_per_kb), 3), ROUND(AVG(genome_size))
 		FROM metadata` + where + ` AND species_taxid IS NOT NULL
 		GROUP BY species_taxid
 		ORDER BY species_taxid`
@@ -1267,7 +1193,7 @@ func (s *Server) zdnaSearch(c *gin.Context) {
 	args := []any{assembly}
 	if v := strings.TrimSpace(c.Query("chr")); v != "" {
 		whereParts = append(whereParts, `"Chromosome" = ?`)
-		args = append(args, v)
+		args = append(args, accessionChromosome(v, strings.TrimSpace(c.Query("assembly_eq"))))
 	}
 	if v := c.Query("start_gte"); v != "" {
 		if n, err := strconv.ParseFloat(v, 64); err == nil {
@@ -1311,7 +1237,7 @@ func (s *Server) zdnaSearch(c *gin.Context) {
 			return
 		}
 	}
-	selectList := `"Chromosome","Start","End","Z-DNA Score","Sequence"`
+	selectList := `"Chromosome","Start","End","Z-DNA Score","Sequence",assembly`
 	orderBy := ""
 	if sortCol != "" {
 		orderBy = fmt.Sprintf(` ORDER BY "%s" %s`, sortCol, order)
@@ -1330,6 +1256,12 @@ func (s *Server) zdnaSearch(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	for _, row := range data {
+		asm, _ := row["assembly"].(string)
+		chrom, _ := row["Chromosome"].(string)
+		row["Chromosome"] = displayChromosome(chrom, asm)
+		delete(row, "assembly")
 	}
 	c.JSON(http.StatusOK, gin.H{"columns": []string{"Chromosome", "Start", "End", "Z-DNA Score", "Sequence"}, "rows": data, "limit": limit, "offset": offset, "total": total})
 }
@@ -1371,7 +1303,7 @@ func (s *Server) zdnaExport(c *gin.Context) {
 	args := []any{assembly}
 	if v := strings.TrimSpace(c.Query("chr")); v != "" {
 		whereParts = append(whereParts, `"Chromosome" = ?`)
-		args = append(args, v)
+		args = append(args, accessionChromosome(v, strings.TrimSpace(c.Query("assembly_eq"))))
 	}
 	if v := c.Query("start_gte"); v != "" {
 		if n, err := strconv.ParseFloat(v, 64); err == nil {
@@ -1410,7 +1342,7 @@ func (s *Server) zdnaExport(c *gin.Context) {
 	if sortCol != "" {
 		orderBy = fmt.Sprintf(` ORDER BY "%s" %s`, sortCol, order)
 	}
-	q := `SELECT "Chromosome","Start","End","Z-DNA Score","Sequence" FROM data ` + where + orderBy
+	q := `SELECT "Chromosome","Start","End","Z-DNA Score","Sequence",assembly FROM data ` + where + orderBy
 	if lim > 0 {
 		q += fmt.Sprintf(" LIMIT %d OFFSET %d", lim, off)
 	}
@@ -1445,7 +1377,8 @@ func (s *Server) zdnaExport(c *gin.Context) {
 				rec[i] = fmt.Sprint(v)
 			}
 		}
-		_ = w.Write(rec)
+		rec[0] = displayChromosome(rec[0], rec[5])
+		_ = w.Write(rec[:5])
 	}
 	w.Flush()
 }
@@ -1457,13 +1390,39 @@ func (s *Server) zdnaDistinctChr(c *gin.Context) {
 		limit = 10
 	}
 
-	q := `SELECT  "Chromosome" AS v FROM chromosomes`
+	assembly := strings.TrimSpace(c.Query("assembly_eq"))
+	expression := `"Chromosome"`
+	source := "chromosomes"
 	args := []any{}
-	if prefix != "" {
-		q += ` WHERE LOWER("Chromosome") LIKE LOWER(?)`
-		args = append(args, prefix+"%")
+	clauses := []string{}
+	if assembly != "" {
+		source = "data"
+		clauses = append(clauses, "assembly = ?")
+		args = append(args, assembly)
+		if assembly == humanAssembly {
+			expression = `CASE "Chromosome"`
+			for i := 0; i < 24; i++ {
+				accession := fmt.Sprintf("NC_%06d.1", 60925+i)
+				expression += " WHEN '" + accession + "' THEN '" + displayChromosome(accession, assembly) + "'"
+			}
+			expression += ` ELSE "Chromosome" END`
+		}
 	}
 
+	if prefix != "" {
+		if assembly == humanAssembly {
+			clauses = append(clauses, "(LOWER("+expression+") LIKE LOWER(?) OR LOWER(\"Chromosome\") LIKE LOWER(?))")
+			args = append(args, prefix+"%", prefix+"%")
+		} else {
+			clauses = append(clauses, "LOWER("+expression+") LIKE LOWER(?)")
+			args = append(args, prefix+"%")
+		}
+	}
+	q := "SELECT DISTINCT " + expression + " AS v FROM " + source
+	if len(clauses) > 0 {
+		q += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	q += " ORDER BY v"
 	q += ` LIMIT ?`
 	args = append(args, limit)
 	rows, err := s.db.Query(q, args...)
@@ -1503,7 +1462,7 @@ func (s *Server) zdnaScoreHistogram(c *gin.Context) {
 	args := []any{assembly}
 	if v := strings.TrimSpace(c.Query("chr")); v != "" {
 		whereParts = append(whereParts, `"Chromosome" = ?`)
-		args = append(args, v)
+		args = append(args, accessionChromosome(v, strings.TrimSpace(c.Query("assembly_eq"))))
 	}
 	if v := c.Query("score_min"); v != "" {
 		if n, err := strconv.ParseFloat(v, 64); err == nil {
@@ -1586,6 +1545,7 @@ type sqlPayload struct {
 
 func (s *Server) sqlPost(c *gin.Context) {
 	var p sqlPayload
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 2*sqlMaxLength)
 	if err := c.ShouldBindJSON(&p); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
 		return
@@ -1597,9 +1557,6 @@ func (s *Server) sqlPost(c *gin.Context) {
 // json_serialize_sql only serializes SELECT statements and returns one entry per
 // statement, so "SELECT 1; DROP TABLE x" and any non-SELECT statement are rejected.
 func validateSingleSelect(db *sql.DB, stmt string) error {
-	if !strings.HasPrefix(strings.ToUpper(stmt), "SELECT ") {
-		return errors.New("only SELECT statements are allowed")
-	}
 	var failed bool
 	var n sql.NullInt64
 	err := db.QueryRow(`
@@ -1615,31 +1572,71 @@ func validateSingleSelect(db *sql.DB, stmt string) error {
 }
 
 func runSQL(s *Server, c *gin.Context, stmt string) {
-	if stmt == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "empty sql"})
+	if !allowSQL(c.ClientIP()) {
+		c.Header("Retry-After", "60")
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "SQL request limit: 120 per minute per IP"})
+		return
+	}
+	if err := validateSQL(stmt); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	if err := validateSingleSelect(s.db, stmt); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	rows, err := s.db.QueryContext(c.Request.Context(), stmt)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), sqlTimeout)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, "SELECT * FROM ("+stmt+") AS portal_result LIMIT 50001")
 	if err != nil {
-		log.Println("sql error:", err, "sql:", stmt)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		status := http.StatusBadRequest
+		if ctx.Err() != nil {
+			status = http.StatusRequestTimeout
+		}
+		c.JSON(status, gin.H{"error": "SQL query failed or exceeded the 30-second limit"})
 		return
 	}
 	defer rows.Close()
-	data, err := rowsToMaps(rows)
+	cols, err := rows.Columns()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot read result columns"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": data})
+	data := make([]map[string]any, 0)
+	truncated := false
+	for rows.Next() {
+		if len(data) == sqlMaxRows {
+			truncated = true
+			break
+		}
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot read query result"})
+			return
+		}
+		row := make(map[string]any, len(cols))
+		for i, col := range cols {
+			if b, ok := vals[i].([]byte); ok {
+				row[col] = string(b)
+			} else {
+				row[col] = vals[i]
+			}
+		}
+		data = append(data, row)
+	}
+	if rows.Err() != nil {
+		c.JSON(http.StatusRequestTimeout, gin.H{"error": "query interrupted"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": data, "truncated": truncated, "row_limit": sqlMaxRows})
 }
 
 // Global base filter for all metadata queries
-const metadataBaseFilter = "genome_size_manual >= 1000"
+const metadataBaseFilter = "genome_size >= 1000"
 
 // Metadata column configuration
 type metadataColumn struct {
@@ -1654,7 +1651,7 @@ var metadataColumns = []metadataColumn{
 	{DbName: "assembly", Label: "Assembly", Hidden: false},
 	{DbName: "taxid", Label: "Taxon ID", Hidden: false},
 	{DbName: "assembly_level", Label: "Assembly level", Hidden: true},
-	{DbName: "genome_size_manual", Label: "Genome size", Hidden: false},
+	{DbName: "genome_size", Label: "Genome size", Hidden: false},
 	{DbName: "gc_percent", Label: "%GC", Hidden: false},
 	{DbName: "superkingdom", Label: "Superkingdom", Hidden: false},
 	{DbName: "kingdom", Label: "Kingdom", Hidden: false},
@@ -1666,13 +1663,7 @@ var metadataColumns = []metadataColumn{
 	{DbName: "tax_name", Label: "Species", Hidden: false},
 	{DbName: "viral_realm", Label: "Viral realm", Hidden: false},
 	{DbName: "updated_tax_name", Label: "Full organism name", Hidden: false},
-	{DbName: "infraspecific_name", Label: "Infraspecific name", Hidden: true},
 	{DbName: "species_taxid", Label: "Species taxon ID", Hidden: true},
-	{DbName: "genome_size_ungapped", Label: "Genome size (ungapped)", Hidden: true},
-	{DbName: "replicon_count", Label: "Replicons", Hidden: true},
-	{DbName: "scaffold_count", Label: "Scaffolds", Hidden: true},
-	{DbName: "contig_count", Label: "Contigs", Hidden: true},
-	{DbName: "reference_genome", Label: "Reference genome", Hidden: true},
 	{DbName: "obs_zbp", Label: "Z-DNA bases count", Hidden: false},
 	{DbName: "obs_density_per_kb", Label: "Z-DNA density per kb", Hidden: false},
 	{DbName: "obs_n_zdna", Label: "Z-DNA predictions count", Hidden: false},
@@ -1768,6 +1759,9 @@ func main() {
 	}
 
 	r := gin.New()
+	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		log.Fatal("invalid TRUSTED_PROXIES: ", err)
+	}
 	r.Use(gin.Recovery()) // panic recovery without request logging
 	r.Use(corsMiddleware(cfg.CORSOrigins))
 	r.Use(s.databaseRequired())
@@ -1789,7 +1783,7 @@ func main() {
 	r.GET("/api/zdna/distinct_chr", s.zdnaDistinctChr)
 	r.GET("/api/zdna/score_histogram", s.zdnaScoreHistogram)
 
-	// home insights (fast-path: parallel queries + 15-min server cache + gzip + browser cache)
+	// Home insights: parallel queries, a process-lifetime cache and gzip.
 	r.GET("/api/home/insights", s.homeInsights)
 
 	// sql helpers

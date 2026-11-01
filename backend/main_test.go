@@ -45,17 +45,17 @@ func TestHomeTopKingdomsUsesTaxidBalancedMean(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	if _, err := db.Exec(`
-		CREATE TABLE metadata (
+		CREATE TABLE metadata_all (
 			kingdom VARCHAR,
 			species_taxid BIGINT,
 			obs_density_per_kb DOUBLE,
-			genome_size_manual BIGINT,
+			genome_size BIGINT,
 			superkingdom VARCHAR
 		)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`
-		INSERT INTO metadata VALUES
+		INSERT INTO metadata_all VALUES
 			('Example kingdom', 1, 0, 2000, 'Bacteria'),
 			('Example kingdom', 1, 10, 2000, 'Bacteria'),
 			('Example kingdom', 2, 15, 2000, 'Bacteria'),
@@ -81,7 +81,7 @@ func TestHomeTopKingdomsUsesTaxidBalancedMean(t *testing.T) {
 
 	// A same-mean assembly changes the assembly count but not taxid 1's weight.
 	if _, err := db.Exec(`
-		INSERT INTO metadata VALUES
+		INSERT INTO metadata_all VALUES
 			('Example kingdom', 1, 5, 2000, 'Bacteria')
 		`); err != nil {
 		t.Fatal(err)
@@ -163,21 +163,21 @@ func TestMetadataExportWithExtraTableColumns(t *testing.T) {
 	cols := []string{}
 	for _, c := range metadataColumns {
 		typ := "VARCHAR"
-		if c.DbName == "genome_size_manual" {
+		if c.DbName == "genome_size" {
 			typ = "BIGINT"
 		}
 		cols = append(cols, quoteIdent(c.DbName)+" "+typ)
 	}
 	// metadata carries columns that are not exported; the export must still emit rows.
 	s := newTestServer(t,
-		"CREATE TABLE metadata ("+strings.Join(cols, ", ")+", genome_size BIGINT)",
-		"INSERT INTO metadata (assembly, genome_size_manual, tax_name) VALUES ('GCF_1.1', 5000, 'x'), ('GCF_2.1', 10, 'y')")
+		"CREATE TABLE metadata ("+strings.Join(cols, ", ")+", internal_extra_column BIGINT)",
+		"INSERT INTO metadata (assembly, genome_size, tax_name) VALUES ('GCF_1.1', 5000, 'x'), ('GCF_2.1', 10, 'y')")
 	records, err := csv.NewReader(serve(t, s.metadataExport, "/api/metadata/export").Body).ReadAll()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(records) != 2 || records[1][0] != "GCF_1.1" {
-		t.Fatalf("export = %v, want header + GCF_1.1 (genome_size_manual < 1000 filtered)", records)
+		t.Fatalf("export = %v, want header + GCF_1.1 (genome_size < 1000 filtered)", records)
 	}
 	if len(records[0]) != len(metadataColumns) {
 		t.Fatalf("header has %d columns, want %d", len(records[0]), len(metadataColumns))
@@ -188,14 +188,14 @@ func TestMetadataExportAppliesFiltersAndFormats(t *testing.T) {
 	cols := []string{}
 	for _, c := range metadataColumns {
 		typ := "VARCHAR"
-		if c.DbName == "genome_size_manual" {
+		if c.DbName == "genome_size" {
 			typ = "BIGINT"
 		}
 		cols = append(cols, quoteIdent(c.DbName)+" "+typ)
 	}
 	s := newTestServer(t,
 		"CREATE TABLE metadata ("+strings.Join(cols, ", ")+")",
-		`INSERT INTO metadata (assembly, genome_size_manual, superkingdom, kingdom) VALUES
+		`INSERT INTO metadata (assembly, genome_size, superkingdom, kingdom) VALUES
 			('GCF_1.1', 5000, 'Eukaryota', 'Metazoa'), ('GCF_2.1', 5000, 'Bacteria', NULL)`)
 
 	records, err := csv.NewReader(serve(t, s.metadataExport, "/api/metadata/export?filter_on_tax=1&superkingdom=Eukaryota&limit=all").Body).ReadAll()
@@ -240,6 +240,7 @@ func TestSQLEndpointAcceptsOnlyOneSelect(t *testing.T) {
 	}
 	for _, q := range []string{
 		"SELECT x FROM metadata",
+		"WITH s AS (SELECT x FROM metadata) SELECT * FROM s",
 		"SELECT COUNT(*) AS n FROM (SELECT x FROM metadata) WHERE x > 0",
 		`SELECT x, ROW_NUMBER() OVER (ORDER BY x) AS r FROM metadata WHERE x IN (SELECT 1)`,
 	} {
@@ -324,7 +325,7 @@ func TestMetadataChartsBalancesBySpeciesTaxid(t *testing.T) {
 	// the taxid-balanced mean is (5 + 20) / 2 = 12.5, not the assembly mean 10.
 	s := newTestServer(t, `
 		CREATE TABLE metadata (assembly VARCHAR, genus VARCHAR, species_taxid BIGINT, obs_density_per_kb DOUBLE,
-			genome_size_manual BIGINT, gc_percent DOUBLE, superkingdom VARCHAR, tax_name VARCHAR)`,
+			genome_size BIGINT, gc_percent DOUBLE, superkingdom VARCHAR, tax_name VARCHAR)`,
 		`INSERT INTO metadata VALUES
 			('A1', 'G1', 1, 0, 2000, 40, 'Bacteria', 's1'),
 			('A2', 'G1', 1, 10, 2000, 50, 'Bacteria', 's1'),
@@ -353,14 +354,14 @@ func TestMetadataListFreeTextSearch(t *testing.T) {
 	cols := []string{}
 	for _, c := range metadataColumns {
 		typ := "VARCHAR"
-		if c.DbName == "genome_size_manual" {
+		if c.DbName == "genome_size" {
 			typ = "BIGINT"
 		}
 		cols = append(cols, quoteIdent(c.DbName)+" "+typ)
 	}
 	s := newTestServer(t,
 		"CREATE TABLE metadata ("+strings.Join(cols, ", ")+")",
-		`INSERT INTO metadata (assembly, genome_size_manual, tax_name) VALUES
+		`INSERT INTO metadata (assembly, genome_size, tax_name) VALUES
 			('GCF_1.1', 5000, 'Escherichia coli'), ('GCF_2.1', 5000, 'Homo sapiens')`)
 	var resp struct {
 		Total int64            `json:"total"`

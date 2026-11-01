@@ -3,8 +3,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { Box, Grid, Paper, Typography, CircularProgress } from '@mui/material';
 import ReactECharts from 'echarts-for-react';
 import { useTheme } from '@mui/material/styles';
+import { shortenKingdom } from '../utils/kingdoms';
 import { skColor } from '../utils/superkingdomColors';
-import { shortenTaxonLabel } from '../utils/shortenLabel';
 import { VIZ_FONT, VIZ_MUI_FONT } from '../utils/visualizationTypography';
 import type { ChartParam } from '../utils/chartTypes';
 
@@ -18,38 +18,30 @@ const fmtInt = (n: number | null | undefined) =>
     ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(n)
     : '—';
 
-type KV = { label: string; n: number; taxids: number };
-
+type KV = { label: string; n: number; superkingdom?: string };
 type InsightsResponse = {
-  kpis: { total_assemblies: number; unique_taxids: number; avg_genome_size: number; avg_gc: number };
-  superkingdoms?: { label: string; n: number; taxids: number }[];
-  top_kingdoms?: { label: string; density?: number; superkingdom?: string; assembly_count?: number; unique_taxids?: number }[];
-  histogram?: { bin: number; n: number }[];
+  kpis: { total_assemblies: number; total_predictions: number; unique_taxids: number; avg_genome_size: number | null; avg_gc: number | null };
+  superkingdoms: { label: string; n: number }[];
+  top_kingdoms: { label: string; density: number; superkingdom: string; assembly_count: number }[];
+  histogram: { bin: number; n: number }[];
+  scatter: { gs: number; gc: number; sk: string }[];
 };
 
-const barOutline = { borderColor: '#000000', borderWidth: 1 };
-type TopKingdom = {
-  label: string;
-  density: number;
-  assemblyCount: number;
-  uniqueTaxids: number;
-  superkingdom: string;
-};
-
-export default function HomeInsights() {
+export default function HomeInsights({ onCounts }: { onCounts?: (assemblies: number, predictions: number) => void }) {
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError]     = useState<string | null>(null);
 
   // KPIs
   const [totalAssemblies, setTotalAssemblies] = useState<number | null>(null);
-  const [uniqueTaxids, setUniqueTaxids] = useState<number | null>(null);
-  const [avgGenome, setAvgGenome] = useState<number | null>(null);
-  const [avgGC, setAvgGC] = useState<number | null>(null);
+  const [uniqueTaxids,    setUniqueTaxids]    = useState<number | null>(null);
+  const [avgGenome,       setAvgGenome]       = useState<number | null>(null);
+  const [avgGC,           setAvgGC]           = useState<number | null>(null);
 
   // Charts
-  const [sk, setSK] = useState<KV[]>([]);
-  const [topK, setTopK] = useState<TopKingdom[]>([]);
+  const [sk,  setSK]   = useState<KV[]>([]);
+  const [topK, setTopK] = useState<KV[]>([]);
   const [hist, setHist] = useState<{ bin: number; n: number }[]>([]);
+  const [scatter, setScatter] = useState<{ gs: number; gc: number; sk: string }[]>([]);
 
   const theme = useTheme();
   const axisLabelColor = theme.palette.mode === 'dark' ? '#ffffff' : '#666666';
@@ -61,107 +53,144 @@ export default function HomeInsights() {
       try {
         setLoading(true); setError(null);
 
-        // Single request — backend computes all charts once and serves them from memory.
+        // Single request — backend runs queries in parallel and caches for this process.
         const res = await fetch('/api/home/insights', { headers: { Accept: 'application/json' } });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const d = await res.json() as InsightsResponse;
 
         if (dead) return;
         setTotalAssemblies(d.kpis.total_assemblies);
+        onCounts?.(d.kpis.total_assemblies, d.kpis.total_predictions);
         setUniqueTaxids(d.kpis.unique_taxids);
         setAvgGenome(d.kpis.avg_genome_size);
         setAvgGC(d.kpis.avg_gc);
 
-        setSK((d.superkingdoms ?? []).map(r => ({ label: String(r.label), n: Number(r.n), taxids: Number(r.taxids) })));
-        setTopK((d.top_kingdoms ?? []).map(r => ({
+        setSK((d.superkingdoms ?? []).map((r) => ({ label: String(r.label), n: Number(r.n) })));
+        setTopK((d.top_kingdoms ?? []).map((r) => ({
           label: String(r.label),
-          density: Number(r.density ?? 0),
+          n: Number(r.density ?? 0),
           superkingdom: String(r.superkingdom ?? '(unknown)'),
-          assemblyCount: Number(r.assembly_count ?? 0),
-          uniqueTaxids: Number(r.unique_taxids ?? 0),
+          cnt: Number(r.assembly_count ?? 0),
         })));
-        setHist((d.histogram ?? []).map(r => ({ bin: Number(r.bin), n: Number(r.n) })));
-      } catch (e) {
-        if (!dead) setError((e instanceof Error && e.message) || 'Failed to load home insights');
+        setHist((d.histogram ?? []).map((r) => ({ bin: Number(r.bin), n: Number(r.n) })));
+        setScatter((d.scatter ?? []).map((r) => ({ gs: Number(r.gs), gc: Number(r.gc), sk: String(r.sk || '') })));
+      } catch (e: unknown) {
+        if (!dead) setError(e instanceof Error ? e.message : 'Failed to load home insights');
       } finally {
         if (!dead) setLoading(false);
       }
     })();
     return () => { dead = true; };
-  }, []);
+  }, [onCounts]);
 
-  // ECharts options
-  const PLOT_FONT = VIZ_FONT.base;
-  // Axis lines: thicker and black (white in dark mode).
-  const axisLine = useMemo(() => ({
-    show: true,
-    lineStyle: { color: theme.palette.mode === 'dark' ? '#ffffff' : '#000000', width: 2 },
-  }), [theme.palette.mode]);
-
-  const topKOpt = useMemo(() => ({
-    textStyle: {
+const topKOpt = useMemo(() => ({
+  textStyle: { fontSize: VIZ_FONT.base,
+    color: axisLabelColor,
+  },
+  tooltip: {
+    trigger: 'axis',
+    formatter: (p: ChartParam[]) => `${p[0]?.name ?? ''}: ${fmtNum(Number(p[0]?.value ?? NaN))}`
+  },
+  grid: { left: 120, right: 20, top: 20, bottom: 55 },
+  xAxis: {
+    type: 'value', name: 'Predicted bp / kb', nameLocation: 'middle', nameGap: 30,
+    nameTextStyle: { fontSize: VIZ_FONT.base, color: axisNameColor },
+    axisLabel: { fontSize: VIZ_FONT.base,
+      formatter: (v: number | string) => fmtNum(Number(v)),
+      color: axisLabelColor
+    }
+  },
+  yAxis: {
+    type: 'category',
+    inverse: true,
+    data: topK.map(d => d.label),
+    axisLabel: { fontSize: VIZ_FONT.base,
       color: axisLabelColor,
-      fontSize: PLOT_FONT,
+      formatter: shortenKingdom
+    }
+  },
+  legend: {
+    show: false, // ή true αν θες
+    textStyle: { fontSize: VIZ_FONT.base, color: axisLabelColor }
+  },
+  series: [{
+    type: 'bar',
+    itemStyle: { borderColor: '#000000', borderWidth: 1 },
+    data: topK.map(d => ({
+      value: d.n,
+      itemStyle: { borderColor: '#000000', borderWidth: 1, color: skColor(d.superkingdom) }
+    }))
+  }]
+}), [topK, axisLabelColor, axisNameColor]);
+
+const histOpt = useMemo(() => ({
+  textStyle: { fontSize: VIZ_FONT.base,
+    color: axisLabelColor,
+  },
+  tooltip: {
+    trigger: 'axis',
+    formatter: (p: ChartParam[]) => `${p[0]?.axisValue}: ${fmtNum(Number(p[0]?.value ?? NaN))}`
+  },
+  grid: {
+    left: 80,
+    right: 20,
+    top: 30,
+    bottom: 80,
+    containLabel: true
+  },
+  xAxis: {
+    type: 'category',
+    name: 'Score',
+    nameLocation: 'middle',
+    nameGap: 50,
+    nameTextStyle: { fontSize: VIZ_FONT.base, color: axisNameColor },
+    data: hist.map(d => d.bin),
+    axisLabel: { fontSize: VIZ_FONT.base,
+      margin: 14,
+      rotate: 45,
+      formatter: (v: number | string) => String(v),
+      color: axisLabelColor
+    }
+  },
+  yAxis: {
+    type: 'log',
+    logBase: 10,
+    min: 1,
+    name: 'Counts',
+    nameTextStyle: { fontSize: VIZ_FONT.base, color: axisNameColor },
+    nameLocation: 'middle',
+    nameGap: 70,
+    axisLabel: { fontSize: VIZ_FONT.base,
+      formatter: (v: number | string) => fmtInt(Number(v)),
+      color: axisLabelColor
+    }
+  },
+  series: [{
+    type: 'bar',
+    itemStyle: { borderColor: '#000000', borderWidth: 1 },
+    data: hist.map(d => d.n)
+  }]
+}), [hist, axisLabelColor, axisNameColor]);
+
+const scatterOpt = useMemo(() => {
+  const bySK = new Map<string, [number, number][]>();
+  scatter.forEach(p => {
+    const key = p.sk || '(unknown)';
+    const arr = bySK.get(key) || [];
+    arr.push([p.gs, p.gc]);
+    bySK.set(key, arr);
+  });
+
+  return {
+    textStyle: { fontSize: VIZ_FONT.base,
+      color: axisLabelColor,
     },
     tooltip: {
-      trigger: 'axis',
-      formatter: (p: ChartParam[]) => {
-        const point = p[0];
-        const data = point?.data ?? {};
-        return [
-          point?.name ?? '',
-          `Taxid-balanced mean density: ${fmtNum(Number(point?.value))} /kb`,
-          `Assemblies: ${fmtInt(Number(data.assemblyCount))}`,
-          `Unique taxids: ${fmtInt(Number(data.uniqueTaxids))}`,
-        ].join('<br/>');
-      },
-      textStyle: { fontSize: VIZ_FONT.defaultTooltip },
-    },
-    grid: { left: 10, right: 30, top: 20, bottom: 10, containLabel: true },
-    xAxis: {
-      type: 'value',
-      axisLine,
-      axisLabel: {
-        formatter: (v: string | number) => fmtInt(Number(v)),
-        color: axisLabelColor,
-        fontSize: PLOT_FONT,
+      trigger: 'item',
+      formatter: (p: ChartParam) => {
+        const value = Array.isArray(p.value) ? p.value : [];
+        return `${p.seriesName}<br/>Genome size: ${fmtInt(Number(value[0]))} bp<br/>GC%: ${fmtNum(Number(value[1]))}`;
       }
-    },
-    yAxis: {
-      type: 'category',
-      inverse: true,
-      axisLine,
-      data: topK.map(d => d.label),
-      axisLabel: {
-        formatter: (v: string) => shortenTaxonLabel(v),
-        color: axisLabelColor,
-        fontSize: PLOT_FONT,
-      }
-    },
-    legend: {
-      show: false,
-      textStyle: { color: axisLabelColor, fontSize: PLOT_FONT }
-    },
-    series: [{
-      type: 'bar',
-      data: topK.map(d => ({
-        value: d.density,
-        assemblyCount: d.assemblyCount,
-        uniqueTaxids: d.uniqueTaxids,
-        itemStyle: { color: skColor(d.superkingdom), ...barOutline }
-      }))
-    }]
-  }), [topK, axisLabelColor, PLOT_FONT, axisLine]);
-
-  const histOpt = useMemo(() => ({
-    textStyle: {
-      color: axisLabelColor,
-      fontSize: PLOT_FONT,
-    },
-    tooltip: {
-      trigger: 'axis',
-      formatter: (p: ChartParam[]) => `${p[0]?.axisValue}: ${fmtInt(Number(p[0]?.value))}`,
-      textStyle: { fontSize: VIZ_FONT.defaultTooltip },
     },
     grid: {
       left: 80,
@@ -171,140 +200,124 @@ export default function HomeInsights() {
       containLabel: true
     },
     xAxis: {
-      type: 'category',
-      name: 'Score',
-      nameLocation: 'middle',
-      nameGap: 55,
-      nameTextStyle: { color: axisNameColor, fontSize: PLOT_FONT },
-      axisLine,
-      data: hist.map(d => d.bin),
-      axisLabel: {
-        margin: 14,
-        rotate: 45,
-        formatter: (v: string | number) => String(v),
-        color: axisLabelColor,
-        fontSize: PLOT_FONT,
-      }
-    },
-    yAxis: {
       type: 'log',
       logBase: 10,
       min: 1,
-      name: 'Counts',
-      nameTextStyle: { color: axisNameColor, fontSize: PLOT_FONT },
+      name: 'Genome size (log{sub|10})',
+      nameTextStyle: { fontSize: VIZ_FONT.base,
+        color: axisNameColor,
+        rich: {
+          sub: {
+            color: axisNameColor,
+            fontSize: VIZ_FONT.subscript,
+            verticalAlign: 'bottom',
+            padding: [6, 0, 0, 0]
+          }
+        }
+      },
       nameLocation: 'middle',
-      nameGap: 80,
-      axisLine,
-      axisLabel: {
-        formatter: (v: string | number) => fmtInt(Number(v)),
-        color: axisLabelColor,
-        fontSize: PLOT_FONT,
+      nameGap: 65,
+      axisLabel: { fontSize: VIZ_FONT.base,
+        formatter: (v: number) => fmtInt(Number(v)),
+        margin: 20,
+        rotate: 45,
+        align: 'right',
+        color: axisLabelColor
       }
     },
-    series: [{
-      type: 'bar',
-      data: hist.map(d => d.n)
-    }]
-  }), [hist, axisLabelColor, axisNameColor, PLOT_FONT, axisLine]);
-
-  // Superkingdom bar charts (assemblies / unique species taxids). Same log10
-  // y-axis with real-count tick labels as the score histogram.
-  const skBarOption = (valueOf: (s: KV) => number, countLabel: string) => {
-    const sorted = [...sk].sort((a, b) => a.label.localeCompare(b.label));
-    const categories = sorted.map(s => s.label);
-
-    const seriesData = sorted.map((s) => ({
-      value: valueOf(s) ?? 0,
-      raw: valueOf(s) ?? 0,
-      itemStyle: { color: skColor(s.label), ...barOutline }
-    }));
-
-    return {
-      textStyle: {
-        color: axisLabelColor,
-        fontSize: PLOT_FONT,
-      },
-      tooltip: {
-        trigger: 'item',
-        formatter: (p: ChartParam) =>
-          `${p.name}<br/>${countLabel}: ${p.data?.raw}`,
-        textStyle: { fontSize: VIZ_FONT.defaultTooltip },
-      },
-      legend: {
-        show: true,
-        bottom: 0,
-        type: 'scroll',
-        data: categories,
-        textStyle: { color: axisLabelColor, fontSize: PLOT_FONT },
-        pageIconColor: axisLabelColor,
-        itemWidth: 14,
-        itemHeight: 10
-      },
-      grid: { left: 80, right: 20, top: 20, bottom: 10, containLabel: true },
-      xAxis: {
-        type: 'category',
-        axisLine,
-        data: categories,
-        axisLabel: {
-          interval: 0,
-          rotate: 45,
-          color: axisLabelColor,
-          fontSize: PLOT_FONT,
-        }
-      },
-      yAxis: {
-        type: 'log',
-        logBase: 10,
-        min: 1,
-        name: 'Counts',
-        nameTextStyle: { color: axisNameColor, fontSize: PLOT_FONT },
-        nameLocation: 'middle',
-        nameGap: 80,
-        axisLine,
-        axisLabel: {
-          formatter: (v: string | number) => fmtInt(Number(v)),
-          color: axisLabelColor,
-          fontSize: PLOT_FONT,
-        }
-      },
-      series: [
-        {
-          type: 'bar',
-          name: 'Superkingdom',
-          data: seriesData,
-          emphasis: { focus: 'series' }
-        }
-      ]
-    };
+    yAxis: {
+      type: 'value',
+      name: 'GC (%)',
+      nameLocation: 'middle',
+      nameGap: 50,
+      nameTextStyle: { fontSize: VIZ_FONT.base, color: axisNameColor },
+      axisLabel: { fontSize: VIZ_FONT.base,
+        formatter: (v: number) => fmtNum(Number(v)),
+        color: axisLabelColor
+      }
+    },
+    legend: { show: false },
+    series: Array.from(bySK.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, pts]) => ({
+        name,
+        type: 'scatter',
+        symbolSize: 6,
+        data: pts,
+        itemStyle: {
+          // ίδιο χρώμα με το Superkingdom distribution
+          color: skColor(name),
+        },
+      })),
   };
+}, [scatter, axisLabelColor, axisNameColor]);
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const skBarOpt = useMemo(() => skBarOption(s => s.n, 'Assembly count'), [sk, axisLabelColor, axisNameColor, PLOT_FONT, axisLine]);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const skTaxidBarOpt = useMemo(() => skBarOption(s => s.taxids, 'Unique taxids'), [sk, axisLabelColor, axisNameColor, PLOT_FONT, axisLine]);
 
-  const chartTitleSx = { mb: 1, fontSize: VIZ_MUI_FONT.chartTitle };
-  const chartCard = (title: string, option: Record<string, unknown>) => (
-    <Grid size={{ xs: 12, md: 6 }}>
-      <Paper sx={{ p: 2, height: 380, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-        <Typography variant="subtitle2" sx={chartTitleSx}>
-          {title}
-        </Typography>
-        <Box sx={{ flex: 1, minWidth: 0 }}>
-          <ReactECharts style={{ width: '100%', height: '100%' }} option={option} />
-        </Box>
-      </Paper>
-    </Grid>
-  );
+const skBarOpt = useMemo(() => {
+  const sorted = [...sk].sort((a, b) => a.label.localeCompare(b.label));
+  const categories = sorted.map(s => s.label);
+
+  const seriesData = sorted.map((s) => ({
+    value: s.n,
+    itemStyle: { borderColor: '#000000', borderWidth: 1, color: skColor(s.label) }
+  }));
+
+  return {
+    textStyle: { fontSize: VIZ_FONT.base,
+      color: axisLabelColor,
+    },
+    tooltip: {
+      trigger: 'item',
+      formatter: (p: ChartParam) =>
+        `${p.name}<br/>Count: ${fmtInt(Number(p.value))}`
+    },
+    legend: {
+      show: true,
+      bottom: 0,
+      type: 'scroll',
+      data: categories,
+      textStyle: { fontSize: VIZ_FONT.base, color: axisLabelColor },
+      pageIconColor: axisLabelColor,
+      itemWidth: 14,
+      itemHeight: 10
+    },
+    grid: { left: 40, right: 20, top: 20, bottom: 120, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: categories,
+      axisLabel: { fontSize: VIZ_FONT.base,
+        interval: 0,
+        rotate: 45,
+        color: axisLabelColor
+      }
+    },
+    yAxis: {
+      type: 'log', logBase: 10, min: 1,
+      name: 'Counts',
+      nameTextStyle: { fontSize: VIZ_FONT.base, color: axisNameColor },
+      nameLocation: 'middle',
+      nameGap: 40,
+      axisLabel: { fontSize: VIZ_FONT.base,
+        formatter: (v: number | string) => fmtInt(Number(v)),
+        color: axisLabelColor
+      }
+    },
+    series: sorted.map((s, i) => ({
+      type: 'bar', name: s.label, barGap: '-100%',
+      itemStyle: { borderColor: '#000000', borderWidth: 1, color: skColor(s.label) },
+      data: sorted.map((_, j) => j === i ? seriesData[i] : null),
+      emphasis: { focus: 'series' }
+    }))
+  };
+}, [sk, axisLabelColor, axisNameColor]);
 
   return (
-    <Box sx={{ mt: 4 }}>
-      <Typography
-        variant="h5"
-        sx={{ mb: 2, fontWeight: 700, fontSize: VIZ_MUI_FONT.pageTitle }}
-      >
-        Quick dataset insights
-      </Typography>
+    <Box sx={{ mt: 4,
+      '& .MuiTypography-caption': { fontSize: VIZ_MUI_FONT.caption },
+      '& .MuiTypography-h6': { fontSize: VIZ_MUI_FONT.metric },
+      '& .MuiTypography-subtitle2': { fontSize: VIZ_MUI_FONT.chartTitle },
+    }}>
+      <Typography variant="h5" sx={{ mb: 2, fontWeight: 700 }}>Quick dataset insights</Typography>
 
       {loading ? (
         <Box sx={{ py: 8, display: 'flex', justifyContent: 'center' }}>
@@ -318,70 +331,78 @@ export default function HomeInsights() {
           <Grid container spacing={2} sx={{ mb: 2 }}>
             <Grid size={{ xs: 12, sm: 6, md: 3 }}>
               <Paper sx={{ p: 2 }}>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ fontSize: VIZ_MUI_FONT.caption }}
-                >
-                  Total assemblies
-                </Typography>
-                <Typography variant="h6" sx={{ mt: .5, fontSize: VIZ_MUI_FONT.cardTitle }}>
+                <Typography variant="caption" color="text.secondary">Total assemblies</Typography>
+                <Typography variant="h6" sx={{ mt: .5 }}>
                   {fmtInt(totalAssemblies)}
                 </Typography>
               </Paper>
             </Grid>
             <Grid size={{ xs: 12, sm: 6, md: 3 }}>
               <Paper sx={{ p: 2 }}>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ fontSize: VIZ_MUI_FONT.caption }}
-                >
-                  Unique taxids
-                </Typography>
-                <Typography variant="h6" sx={{ mt: .5, fontSize: VIZ_MUI_FONT.cardTitle }}>
+                <Typography variant="caption" color="text.secondary">Unique species taxids</Typography>
+                <Typography variant="h6" sx={{ mt: .5 }}>
                   {fmtInt(uniqueTaxids)}
                 </Typography>
               </Paper>
             </Grid>
             <Grid size={{ xs: 12, sm: 6, md: 3 }}>
               <Paper sx={{ p: 2 }}>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ fontSize: VIZ_MUI_FONT.caption }}
-                >
-                  Avg. genome size (bp)
-                </Typography>
-                <Typography variant="h6" sx={{ mt: .5, fontSize: VIZ_MUI_FONT.cardTitle }}>
-                  {fmtInt(avgGenome == null ? null : Math.round(avgGenome / 10) * 10)}
-                </Typography>
+                <Typography variant="caption" color="text.secondary">Avg. genome size</Typography>
+                <Typography variant="h6" sx={{ mt: .5 }}>{fmtInt(avgGenome)} bp</Typography>
               </Paper>
             </Grid>
             <Grid size={{ xs: 12, sm: 6, md: 3 }}>
               <Paper sx={{ p: 2 }}>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ fontSize: VIZ_MUI_FONT.caption }}
-                >
-                  Avg. %GC
-                </Typography>
-                <Typography variant="h6" sx={{ mt: .5, fontSize: VIZ_MUI_FONT.cardTitle }}>
-                  {fmtNum(avgGC)}
-                </Typography>
+                <Typography variant="caption" color="text.secondary">Avg. %GC</Typography>
+                <Typography variant="h6" sx={{ mt: .5 }}>{fmtNum(avgGC)}%</Typography>
               </Paper>
             </Grid>
           </Grid>
 
-          <Grid container spacing={2}>
-            {chartCard('Assemblies by Superkingdom', skBarOpt)}
-            {chartCard('Taxonomy IDs by Superkingdom', skTaxidBarOpt)}
-          </Grid>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Counts include all assemblies, including those with no predictions. Genome size, GC and kingdom density
+            are averaged within species taxids, then across species; missing values are omitted per metric.
+          </Typography>
+          {/* Charts */}
+          <Grid container spacing={2} sx={{ width: '100%' }}>
+            <Grid size={{ xs: 12, md: 6 }}>
+              <Paper sx={{ p: 2, height: 380, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                <Typography variant="subtitle2" sx={{ mb: 1 }}>Superkingdom distribution</Typography>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <ReactECharts style={{ width: '100%', height: '100%' }} option={skBarOpt} />
+                </Box>
+              </Paper>
+            </Grid>
 
-          <Grid container spacing={2} sx={{ mt: 2 }}>
-            {chartCard('Highest Z-DNA density kingdoms', topKOpt)}
-            {chartCard('Z-DNA scores distribution (sampled)', histOpt)}
+            <Grid size={{ xs: 12, md: 6 }}>
+              <Paper sx={{ p: 2, height: 380, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                <Typography variant="subtitle2" sx={{ mb: 1 }}>Kingdoms with highest Z-DNA / Z-RNA density</Typography>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <ReactECharts style={{ width: '100%', height: '100%' }} option={topKOpt} />
+                </Box>
+              </Paper>
+            </Grid>
+          </Grid>
+          <br></br>
+
+          <Grid container spacing={2} sx={{ width: '100%', mt: 0 }}>
+            <Grid size={{ xs: 12, md: 6 }}>
+              <Paper sx={{ p: 2, height: 380, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                <Typography variant="subtitle2" sx={{ mb: 1, marginBottom: '12px' }}>Scores distribution (sampled)</Typography>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <ReactECharts style={{ width: '100%', height: '100%' }} option={histOpt} />
+                </Box>
+              </Paper>
+            </Grid>
+
+            <Grid size={{ xs: 12, md: 6 }}>
+              <Paper sx={{ p: 2, height: 380, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                <Typography variant="subtitle2" sx={{ mb: 1 }}>Genome size vs %GC (sampled)</Typography>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <ReactECharts style={{ width: '100%', height: '100%' }} option={scatterOpt} />
+                </Box>
+              </Paper>
+            </Grid>
           </Grid>
         </>
       )}

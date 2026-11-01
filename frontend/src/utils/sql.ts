@@ -3,6 +3,7 @@ type SqlResponse = {
   rows?: unknown[];
   columns?: string[];
   error?: string;
+  truncated?: boolean;
 };
 
 /**
@@ -19,6 +20,7 @@ export async function runSQL<T = Record<string, unknown>>(sql: string): Promise<
   try { j = JSON.parse(text); } catch { /* non-JSON error body */ }
   const body = (j && !Array.isArray(j) ? j : {}) as SqlResponse;
   if (!r.ok) throw new Error(body.error ? String(body.error) : `SQL HTTP ${r.status}`);
+  if (body.truncated) throw new Error('SQL results exceeded the row limit; narrow or page the query');
   if (Array.isArray(body.data)) return body.data as T[];
   if (Array.isArray(body.rows) && Array.isArray(body.columns)) {
     const cols = body.columns;

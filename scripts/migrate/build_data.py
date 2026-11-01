@@ -9,16 +9,14 @@ Robust + resumable:
     completed set is always the first N sorted files -> safe across restarts AND
     across changes to the batching scheme.
 
-Schema:
+Native prediction schema:
   Chromosome VARCHAR, Start BIGINT, End BIGINT, "Z-DNA Score" FLOAT,
   Sequence VARCHAR, assembly VARCHAR
-
-Placeholder rows (`Chromosome,,,,`, one per sequence without predictions) are skipped.
-Assemblies missing from the metadata TSV are removed later by build_meta_stats.py.
 """
 import os
 import glob
 import time
+from concurrent.futures import ThreadPoolExecutor
 from common import connect, CSV_DIR, ACCESSION_RE, LOG_DIR, DB_PATH
 
 CAP_BYTES = int(os.environ.get("MIG_BATCH_BYTES", str(500 * 1024 * 1024)))  # ~500MB input/batch
@@ -45,9 +43,10 @@ def select_from(files_sql):
         SELECT "Chromosome", "Start", "End", "Z-DNA Score", "Sequence",
                regexp_extract(parse_filename(filename), '{ACCESSION_RE}', 1) AS assembly
         FROM read_csv([{files_sql}], header=true, delim=',',
-                      columns={COLS}, filename=true)
-        -- ZSeeker emits `Chromosome,,,,` for every sequence without predictions
-        WHERE "Start" IS NOT NULL
+                      columns={COLS}, filename=true, nullstr=['NA','N/A',''])
+        WHERE "Chromosome" IS NOT NULL AND "Start" IS NOT NULL
+          AND "End" >= "Start" AND "Z-DNA Score" IS NOT NULL
+          AND "Sequence" IS NOT NULL AND length("Sequence") = "End" - "Start" + 1
     """
 
 
@@ -95,8 +94,15 @@ def main():
     con = connect()
     ensure_schema(con)
 
-    files = sorted(p for p in glob.glob(os.path.join(CSV_DIR, "*.zseeker.csv")) if os.path.getsize(p) > 0)
-    sizes = [os.path.getsize(p) for p in files]
+    log(f"discovering source CSV files in {CSV_DIR}")
+    candidates = sorted(glob.glob(os.path.join(CSV_DIR, "*.zseeker.csv")))
+    log(f"checking sizes of {len(candidates):,} source CSV files")
+    # Shared-filesystem stat latency dominates a serial walk over 324k files.
+    with ThreadPoolExecutor(max_workers=int(os.environ.get("MIG_STAT_WORKERS", "32"))) as pool:
+        candidate_sizes = list(pool.map(os.path.getsize, candidates))
+    nonempty = [(p, size) for p, size in zip(candidates, candidate_sizes) if size > 0]
+    files = [p for p, _ in nonempty]
+    sizes = [size for _, size in nonempty]
     total = len(files)
 
     done_files = con.execute("SELECT COALESCE(SUM(nfiles),0) FROM _ingest_state").fetchone()[0]
