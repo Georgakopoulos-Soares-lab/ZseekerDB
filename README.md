@@ -21,7 +21,7 @@ The database built on 27 October 2026 contains:
 | Assemblies without predictions | 175,983 |
 | Species grouping identifiers | 60,841 |
 | Predicted loci | 2,563,977,909 |
-| Species-balanced mean genome size | 108,425,047 bp |
+| Species-balanced mean genome size | 108,459,204 bp |
 | Species-balanced mean G+C content | 47.7% |
 
 Assembly attributes come from the supplied metadata; prediction counts,
