@@ -547,7 +547,8 @@ export default function Explorer() {
       const single = chrStats.length > 0 && (Boolean(chr) || total === 1);
 
       // Chromosome extent for the 10 bins. Chromosome lengths are not stored, so this is
-      // the assembly size for single-sequence assemblies, otherwise the last predicted base.
+      // the assembly size for single-sequence assemblies, otherwise up to the last predicted
+      // base. ZSeeker coordinates are zero-based with inclusive ends, so that is MAX("End") + 1.
       let chromLen = 0;
       if (single) {
         const chrName = chr ?? chrStats[0].chr;
@@ -557,7 +558,8 @@ export default function Explorer() {
           const r = await runSQL<Record<string, unknown>>(
             `SELECT MAX("End") AS m FROM data WHERE ${contextWhere} AND "Chromosome" = ${q(chrName)}`
           ).catch(() => []);
-          chromLen = Number(getVal(r[0], 'm') ?? 0);
+          const lastEnd = getVal(r[0], 'm');
+          chromLen = lastEnd == null ? 0 : Number(lastEnd) + 1;
         }
         if (request !== vizRequest.current) return;
       }
@@ -583,7 +585,7 @@ export default function Explorer() {
         LIMIT ${SCATTER_SAMPLE}
       `;
       const sqlBins = binSize > 0 ? `
-        SELECT LEAST(GREATEST(CAST(FLOOR(("Start" - 1) / ${binSize}) AS INT), 0), ${VIZ_BINS - 1}) AS b, COUNT(*) AS n
+        SELECT LEAST(GREATEST(CAST(FLOOR("Start" / ${binSize}) AS INT), 0), ${VIZ_BINS - 1}) AS b, COUNT(*) AS n
         FROM data
         WHERE ${whereSql}
         GROUP BY 1
