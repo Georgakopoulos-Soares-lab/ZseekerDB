@@ -17,7 +17,7 @@ The database built on 27 October 2026 contains:
 | Metric | Value |
 | --- | ---: |
 | All genome assemblies | 324,200 |
-| Assemblies with predictions | 148,217 |
+| Assemblies with predictions | 148,215 |
 | Assemblies without predictions | 175,983 |
 | Species grouping identifiers | 60,841 |
 | Predicted loci | 2,563,977,909 |
