@@ -16,20 +16,24 @@ The database built on 27 October 2026 contains:
 
 | Metric | Value |
 | --- | ---: |
-| All genome assemblies | 324,200 |
+| All genome assemblies | 324,198 |
 | Assemblies with predictions | 148,215 |
 | Assemblies without predictions | 175,983 |
 | Species grouping identifiers | 60,841 |
-| Predicted loci | 2,563,977,909 |
-| Species-balanced mean genome size | 108,459,204 bp |
+| Predicted loci | 2,563,977,897 |
+| Species-balanced mean genome size | 108,166,650 bp |
 | Species-balanced mean G+C content | 47.7% |
 
-Assembly attributes come from the supplied metadata; prediction counts,
-predicted-base totals and densities were recomputed from the source CSVs.
-Species grouping uses `ncbi_species_taxid` (stored as `species_taxid`), rather
-than the assembly/strain `ncbi_taxid`. The complete metadata includes assemblies
-with no predictions. The Species Browser lists prediction-bearing assemblies
-with a reported genome size of at least 1,000 bp.
+Assembly attributes come from the assembly metadata TSV shipped as
+`data/metadata.tsv.gz`. `genome_size_manual` is computed from each FASTA as
+total bases minus N stretches (`scripts/benchmarking/04_genome_size.sh`);
+prediction counts, predicted bases and densities (`z_bases / genome_size_manual`)
+are computed from the ZSeeker output CSVs (`scripts/benchmarking/08_z_density.py`).
+Genome-size statistics use `genome_size_manual`. Species grouping uses
+`ncbi_summary_species_taxid` (loaded as `species_taxid`), rather than the
+assembly/strain `ncbi_summary_taxid`. The metadata includes assemblies with no
+predictions, and the Species Browser lists every assembly with
+`genome_size_manual` of at least 1,000 bp, including those without predictions.
 
 The final assembly-metadata TSV has SHA-256
 `2a67abe869d6ae5a88843ae98ff0e3ac966322cc2a2091bf51d01926f9ed051e`.
@@ -54,10 +58,9 @@ format**. The full archives are split by assembly accession; each part contains
 the complete metadata. Individual superkingdom archives provide a smaller download.
 Extract the `.tar.gz` files to access prediction and metadata tables.
 
-The published records report **324,198 assemblies and 2,563,977,897 predictions**;
-the verified portal catalog above contains **324,200 assemblies and 2,563,977,909
-predictions**. Use the metadata bundled with the downloaded archives for their
-assembly attributes and counts.
+The published records report **324,198 assemblies and 2,563,977,897 predictions**,
+matching the portal catalog above. Use the metadata bundled with the downloaded
+archives for their assembly attributes and counts.
 
 **Archived BED coordinates:** the published four-column files contain chromosome,
 start, native inclusive end and raw ZSeeker score. A checked locus is
@@ -65,7 +68,7 @@ start, native inclusive end and raw ZSeeker score. A checked locus is
 Add one to the end before using these archived BED files with BED tools. The
 repository's `export_release.py` already performs this conversion and writes
 assembly/score names when generating BED4. Archived chromosome accessions are
-preserved; the portal displays human chromosome aliases at the interface boundary.
+preserved; only the portal names human chromosomes 1–22, X, Y (see below).
 
 ### Reconstruction from repository-generated exports
 
@@ -125,11 +128,11 @@ BED uses zero-based, half-open intervals: `chromStart = Start`,
 `chromEnd = End + 1`. Conversion must be explicit; renaming a CSV to BED is
 not a coordinate conversion. GFF3 coordinates are one-based and inclusive.
 
-For `GCF_009914755.1` only, the portal and its result exports display
-`NC_060925.1`–`NC_060948.1` as `1`–`22`, `X`, `Y`. Both chromosome labels and
-accessions are accepted by assembly-scoped filters. Other assemblies and
-unmapped contigs keep their source accessions. The underlying table remains in
-source coordinates and source accession names.
+For `GCF_009914755.1` only, the portal's `data` view renames
+`NC_060925.1`–`NC_060948.1` to `1`–`22`, `X`, `Y`, so searches, filters, plots
+and result exports use these names. Other assemblies and unmapped contigs keep
+their source accessions. The DuckDB file itself keeps source coordinates and
+source accession names.
 
 ### Assembly metadata
 
@@ -181,33 +184,28 @@ and `Number of predicrions` (legacy spelling). Types are inherited unchanged.
 
 ## Summary statistics
 
-Homepage genome size and GC are calculated in two stages: average the available
-assembly values within each positive, non-null `species_taxid`, then average
+Homepage genome size (`genome_size_manual`) and GC are calculated in two
+stages: average the assembly values within each `species_taxid`, then average
 those species means. Missing values are omitted independently for each metric.
 Kingdom density uses the same two-stage averaging within each kingdom,
-including zero densities, and excludes names containing `unclassified` before
-ranking the ten highest kingdoms. Species balancing reduces multiple-assembly
-weighting; it is not a correction for phylogenetic dependence.
+including zero densities for assemblies without predictions, over assemblies
+with `genome_size_manual` of at least 1,000 bp, and excludes names containing
+`unclassified` before ranking the ten highest kingdoms. Species balancing
+reduces multiple-assembly weighting; it is not a correction for phylogenetic
+dependence.
 
-Superkingdom bars count all metadata rows and must sum to the assembly KPI.
-The score histogram uses a deterministic hash sample averaging about four
-predictions per species grouping ID; the genome-size/GC scatter
-samples up to 5,000 assemblies with positive genome size and available GC.
-Verified score histograms are embedded in the backend to avoid rescanning
-billions of predictions at each deployment. A cache is used only when the
-observed-assembly/species/count fingerprint, sampling setting and database
-score/length statistics match. Generate it before deploying a rebuilt database:
+The two superkingdom charts count assemblies and unique species taxids with
+`genome_size_manual` of at least 1,000 bp; in this release every assembly
+qualifies, so the assembly bars sum to the assembly KPI. The score histogram
+uses a deterministic hash sample averaging about four predictions per species
+grouping ID. All homepage results are computed once at startup and served
+from memory for the life of the process.
 
-```bash
-python3 scripts/migrate/cache_home_histogram.py /path/to/verified.duckdb
-```
-
-Commit the generated `backend/assets/home_histograms.json` with the database
-build changes. An unmatched dataset computes its sample from the database.
 Chromosome plots count loci in ten equal-width windows by their zero-based
 `Start`; genome-wide plots count loci per chromosome. These are locus counts,
-not predicted base-pair densities. Chromosome extents are inferred from the last
-predicted end because per-chromosome reference lengths are unavailable.
+not predicted base-pair densities. Per-chromosome reference lengths are not
+stored: the window extent is the assembly genome size for single-sequence
+assemblies, otherwise it runs to the last predicted base (`MAX(End) + 1`).
 
 ## Data pipeline
 
@@ -263,56 +261,74 @@ are the code's versions; historical manuscript dependency numbers are not used
 as a substitute for the manifests.
 
 The frontend's Explorer builds analytical SELECT queries for the API. Assembly
-search links use stable accessions; chromosome aliases are applied at the UI
-and export boundaries. Server CSV exports stream rows; client CSV, TSV, JSON,
+search links use stable accessions; human chromosome names come from the
+backend `data` view. Server CSV exports stream rows; client CSV, TSV, JSON,
 XML and Excel (HTML `.xls`) exports are capped at one million rows and fetched
 in 50,000-row batches.
 
 ## API and SQL safeguards
 
-- `GET /api/home/insights`: complete assembly KPIs, species-balanced means and
-  four plot datasets; computed once and cached for the process lifetime.
-- `GET /api/metadata/list`, `/distinct`, `/classes/top`, `/export`: browser metadata.
-- `GET /api/zdna/search`, `/distinct_chr`, `/score_histogram`, `/export`: predictions.
+Used by the React UI:
+
+- `GET /api/home/insights`: homepage KPIs and charts, computed once at startup.
+- `GET /api/metadata/list`, `/export`, `/charts`, `/distinct`: Species browser
+  table, downloads (CSV, TSV, JSON, XML, XLS), charts and filter options; all
+  take the same taxonomy/range filter parameters.
 - `GET /api/sql?query=...` or `POST /api/sql` with `{"sql":"SELECT ..."}`:
-  the portal's restricted analytical SQL dialect.
+  a single validated, read-only SELECT query.
+
+Other routes:
+
 - `GET /api/health`: health, including unavailable database status.
+- `GET /api/zdna/search`, `/export`, `/score_histogram`: raw predictions for one
+  assembly; `assembly_eq=<accession>` is required.
+- `GET /api/zdna/distinct_chr`, `/api/metadata/classes/top`,
+  `/api/metadata/preview`, `/api/zdna/preview`.
+- `POST /api/admin/init`: recreates views; disabled unless `ADMIN_TOKEN` is set,
+  and then requires the same value in the `X-Admin-Token` header.
 
-SQL requests accept a single SELECT or read-only WITH statement. Comments,
-statement separators, dollar quoting, write/DDL/configuration commands (including
-INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, ATTACH, COPY, EXPORT, INSTALL, LOAD,
-PRAGMA), unapproved functions and direct non-portal FROM/JOIN sources are rejected.
-The engine also disables external access and locks its configuration at startup.
-The whitelist is deliberately narrower than general DuckDB SQL.
-
-Limits: **32,768 SQL bytes**, **30 seconds**, **50,000 returned rows**, and
-**120 SQL requests per minute per IP**. Results report `truncated` and `row_limit`.
-Large downloads should use archived datasets. Trusted proxy headers are disabled;
-if deploying behind a proxy, set `TRUSTED_PROXIES` to the exact comma-separated
-proxy addresses or CIDRs before using forwarded IPs for per-user rate limiting. A shared proxy IP otherwise
-shares the same rate limit.
+SQL requests must be exactly one statement beginning with `SELECT`. DuckDB's own
+parser validates the request (`json_serialize_sql` serializes only SELECT
+statements, one entry per statement), so chained statements and write, DDL,
+ATTACH, COPY, EXPORT, INSTALL, LOAD, PRAGMA and SET commands are rejected. After
+startup the engine sets `enable_external_access = false` and
+`lock_configuration = true`, so no query can read or write files or the
+network or change these settings. A query is cancelled when its client
+disconnects. Large downloads should use the archived datasets.
 
 ## Deployment and local validation
 
 The Docker image builds React and serves it from Go in one Railway service.
-The runtime always attaches the verified database read-only and exposes its
-tables through in-memory views. Browser metadata adds `species_taxid` from
-`metadata_all` when the browser table does not already contain it. Mount a volume at `/data`, place the verified database at
-`/data/zdnadatabase.duckdb`, and set `DUCKDB_PATH` accordingly. `PORT` is supplied
-by Railway. Optional `CORS_ORIGIN` is a comma-separated origin list.
+Mount a volume at `/data`, place the database at `/data/zdnadatabase.duckdb`,
+and set `DUCKDB_PATH` accordingly. `PORT` is supplied by Railway. Optional
+`CORS_ORIGIN` is a comma-separated origin list; it is not needed with the
+bundled frontend.
 
-Without the database the service starts with degraded health and data routes
-return 503; restart after installing the file. Runtime data files are excluded
-from Git. If the mounted database contains `metadata` without `metadata_all`,
-the runtime reads complete assembly attributes from `METADATA_GLOB` (default
-`data/metadata.tsv.gz`, included in the Docker image). It creates `metadata_all`
-in memory, retains assemblies with zero predictions, takes prediction counts
-from the mounted `data_top_asm` table and observed base totals from its metadata,
-and computes densities using `genome_size`. TSV prediction summaries are ignored.
-Assembly coverage and prediction totals must match the mounted database before
-initialization succeeds. The volume is never modified. Databases with their own
-`metadata_all` use it directly and need no external metadata file.
-Pass assembly attributes explicitly through `MIG_META_TSV` for builds.
+At startup the backend attaches the DuckDB file **read-only** as `zdb` and
+exposes its tables under their usual names, except `metadata`. The DuckDB
+`metadata` table only holds assemblies with predictions, so the backend loads
+`data/metadata.tsv.gz` (`METADATA_GLOB`; included in the Docker image) into an
+in-memory `metadata` table with all release assemblies, including those with
+no predictions. That table uses `genome_size_manual` as the only genome size
+(the TSV's raw `genome_size` is not loaded) and takes prediction counts,
+predicted bases and density (`z_density` × 1,000, per kb) from the TSV. The
+`data` view applies the human chromosome names described above. The volume is
+never modified.
+
+Without the database or the metadata TSV the service starts with degraded
+health (HTTP 200, `"status":"degraded"`) and data routes return 503; restart
+after installing the file. Database files are excluded from Git.
+
+| Variable | Default |
+| --- | --- |
+| `DUCKDB_PATH` | `data/zdnadatabase.duckdb` |
+| `METADATA_GLOB` | `data/metadata.tsv.gz` |
+| `DUCKDB_THREADS` | `6` |
+| `DUCKDB_MEMORY_LIMIT_GB` | `4` |
+| `DUCKDB_TEMP_DIR`, `DUCKDB_MAX_TEMP_GIB` | `data/tmp`, `50` |
+| `HOST`, `PORT` | `0.0.0.0`, `8080` |
+| `CORS_ORIGIN` | `http://localhost:5173,http://localhost:3000` |
+| `ADMIN_TOKEN` | unset (`/api/admin/init` disabled) |
 
 ```bash
 cd backend && go test ./...
