@@ -163,9 +163,7 @@ becomes SQL NULL; failed numeric conversions become NULL, not zero.
 | `obs_n_zdna` | BIGINT | Actual number of prediction rows; source TSV field `Z-DNA/-RNA predictions count` is replaced during the final build |
 
 Additional source TSV attributes are retained in the archived TSV, not silently
-promoted to queryable fields. Taxonomy normalization (including any Protists or
-viral-realm assignment) is supplied upstream; this repository does not recreate
-that mapping. All supplied taxon labels are retained.
+promoted to queryable fields. Taxonomy normalization, including the Protists and viral-realm assignments, is reproduced by scripts/benchmarking/06_add_taxonomy.py All supplied taxon labels are retained.
 
 ### Auxiliary fields
 
