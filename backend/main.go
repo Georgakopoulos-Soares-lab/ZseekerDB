@@ -309,10 +309,7 @@ func (s *Server) computeInsights() ([]byte, error) {
 		UniqueTaxids  int64   `json:"unique_taxids"`
 		Superkingdom  string  `json:"superkingdom"`
 	}
-	type HistBin struct {
-		Bin float64 `json:"bin"`
-		N   int64   `json:"n"`
-	}
+	type HistBin = scoreHistogramBin
 	type KPIs struct {
 		TotalAssemblies  int64    `json:"total_assemblies"`
 		TotalPredictions int64    `json:"total_predictions"`
@@ -405,6 +402,17 @@ func (s *Server) computeInsights() ([]byte, error) {
 	})
 
 	g.Go(func() error {
+		cacheCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cached, ok, cacheErr := precomputedScoreHistogram(cacheCtx, s.db)
+		cancel()
+		if cacheErr != nil {
+			log.Printf("Homepage histogram cache check: %v", cacheErr)
+		}
+		if ok {
+			histRows = cached
+			return nil
+		}
+		log.Print("Homepage score histogram: no matching cache; computing the balanced sample")
 		rows, err := s.db.Query(homeScoreHistogramQuery)
 		if err != nil {
 			return err

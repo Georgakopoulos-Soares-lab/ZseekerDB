@@ -195,6 +195,17 @@ Superkingdom bars count all metadata rows and must sum to the assembly KPI.
 The score histogram uses a deterministic hash sample averaging about four
 predictions per species grouping ID; the genome-size/GC scatter
 samples up to 5,000 assemblies with positive genome size and available GC.
+Verified score histograms are embedded in the backend to avoid rescanning
+billions of predictions at each deployment. A cache is used only when the
+observed-assembly/species/count fingerprint, sampling setting and database
+score/length statistics match. Generate it before deploying a rebuilt database:
+
+```bash
+python3 scripts/migrate/cache_home_histogram.py /path/to/verified.duckdb
+```
+
+Commit the generated `backend/assets/home_histograms.json` with the database
+build changes. An unmatched dataset computes its sample from the database.
 Chromosome plots count loci in ten equal-width windows by their zero-based
 `Start`; genome-wide plots count loci per chromosome. These are locus counts,
 not predicted base-pair densities. Chromosome extents are inferred from the last

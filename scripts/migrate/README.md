@@ -66,6 +66,12 @@ Run: `python3 -m pytest scripts/migrate/tests/ -q`
 
 ## Final supplementary metadata and downloads
 
+After verification, run `cache_home_histogram.py DATABASE` to prepare the exact
+species-balanced score histogram for the backend. Commit its generated
+`backend/assets/home_histograms.json` with the release code. The runtime checks
+the complete observed assembly/species/count fingerprint and database score/length
+statistics before using it, so cold starts do not scan billions of predictions.
+
 After the database verifier passes:
 
 ```bash
