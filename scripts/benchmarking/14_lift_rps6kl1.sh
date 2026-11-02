@@ -7,7 +7,7 @@
 #   5. transfer the annotation with Liftoff (min. sequence identity and coverage 0.90)
 #
 # Requires: wget, minimap2, liftoff
-# Usage: bash scripts/13_lift_rps6kl1.sh [GENOME_DIR] [OUT_DIR]
+# Usage: bash scripts/14_lift_rps6kl1.sh [GENOME_DIR] [OUT_DIR]
 
 set -euo pipefail
 
