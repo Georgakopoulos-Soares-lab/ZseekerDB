@@ -2,7 +2,7 @@
 """Draw Figure 6A-D from the tables written by 11_composition_stats.py.
 
   A  log2 enrichment of dinucleotide classes in loci vs genome, per superkingdom
-  B  genomic G+C vs Z-DNA/Z-RNA density (one point per species, hexagonal bins)
+  B  genomic G+C vs Z-DNA density (one point per species, hexagonal bins)
   C  dinucleotide composition of loci across genomic G+C (median + IQR)
   D  density per superkingdom (all species, including zero density)
 
